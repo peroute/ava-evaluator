@@ -1,0 +1,30 @@
+{
+  "provider_session_id": "conv_demo_001",
+  "raw_pairs": [
+    {
+      "pair_index": 0,
+      "caller_asked": "Hi, I'm interested in your online business degree.",
+      "agent_said": "Hi there, thanks for calling Texas Tech Online! Which one did you have in mind?"
+    },
+    {
+      "pair_index": 1,
+      "caller_asked": "The general business one.",
+      "agent_said": "Great choice. The Online Bachelor of Business Administration in General Business is delivered fully asynchronously, with no scheduled live class meetings."
+    },
+    {
+      "pair_index": 2,
+      "caller_asked": "What GPA do I need to get in?",
+      "agent_said": "For the Online BBA in General Business, the minimum cumulative grade point average required is 2.5 from the most recently attended institution."
+    },
+    {
+      "pair_index": 3,
+      "caller_asked": "Do I need to send transcripts?",
+      "agent_said": "Yes. You must submit official transcripts from every institution previously attended, regardless of whether credit was earned."
+    },
+    {
+      "pair_index": 4,
+      "caller_asked": "Is there parking on campus if I ever need to come in?",
+      "agent_said": "Online students who visit campus can purchase a commuter parking permit for 75 dollars per semester."
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Secrets
+.env
+
+# Local data
+data/
+*.db
+*.sqlite3
+
+# Generated sample KB (rebuild with scripts/make_sample_kb.py)
+sample_data/kb/*.docx
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+{
+  "provider_session_id": "conv_demo_002",
+  "raw_pairs": [
+    {
+      "pair_index": 0,
+      "caller_asked": "Hi, does the online computer science degree have live classes?",
+      "agent_said": "Hi! The Online Bachelor of Science in Computer Science includes two synchronous lab sessions per week."
+    },
+    {
+      "pair_index": 1,
+      "caller_asked": "And what about the business one, what GPA does that need?",
+      "agent_said": "The Online BBA in General Business requires a minimum cumulative grade point average of 2.0 from the most recently attended institution."
+    },
+    {
+      "pair_index": 2,
+      "caller_asked": "Great, thanks!",
+      "agent_said": "You're welcome! Have a great day."
+    }
+  ]
+}
