@@ -15,12 +15,18 @@
 
 -- === Step 1: ingest ========================================================
 
+-- raw_payload keeps the provider's complete original conversation as JSON text,
+-- for auditing and reprocessing; it is NULL only for rows ingested before it was
+-- captured. Databases created before these two columns existed get them from
+-- store.init_db, since CREATE TABLE IF NOT EXISTS cannot add columns.
 CREATE TABLE IF NOT EXISTS conversations (
     session_id   TEXT PRIMARY KEY,
     source_file  TEXT NOT NULL,
     status       TEXT NOT NULL,          -- accepted | rejected
     note         TEXT NOT NULL DEFAULT '',
-    ingested_at  TEXT NOT NULL
+    ingested_at  TEXT NOT NULL,
+    source_type  TEXT NOT NULL DEFAULT 'json_export',   -- which TranscriptSource produced it
+    raw_payload  TEXT                                   -- JSON text, not a BLOB
 );
 
 CREATE TABLE IF NOT EXISTS turns (

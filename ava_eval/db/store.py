@@ -91,7 +91,49 @@ def init_db(db_path: Path | None = None) -> Path:
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
     with connect(path) as conn:
         conn.executescript(schema)
+        _add_missing_columns(conn)
     return path
+
+
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an
+# existing table untouched, so older databases are brought up to date here.
+_ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "conversations": [
+        ("source_type", "TEXT NOT NULL DEFAULT 'json_export'"),
+        ("raw_payload", "TEXT"),
+    ],
+}
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add any column in ``_ADDED_COLUMNS`` that an older database lacks.
+
+    PORTABILITY: ``PRAGMA table_info`` is SQLite-only. On PostgreSQL this becomes
+    ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` and the lookup goes away.
+    """
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+@contextmanager
+def savepoint(conn: sqlite3.Connection, name: str = "unit_of_work") -> Iterator[None]:
+    """Make a block of writes atomic without committing the surrounding transaction.
+
+    On an exception everything written inside the block is rolled back and the
+    exception re-raised; earlier work on the same connection is kept. SAVEPOINT
+    is standard SQL, so this ports to PostgreSQL unchanged.
+    """
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except BaseException:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        conn.execute(f"RELEASE SAVEPOINT {name}")
+        raise
+    conn.execute(f"RELEASE SAVEPOINT {name}")
 
 
 def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
@@ -134,25 +176,49 @@ def upsert_conversation(
     source_file: str,
     status: ConversationStatus,
     note: str = "",
+    *,
+    source_type: str = "json_export",
+    raw_payload: Any = None,
 ) -> None:
-    """Record a conversation, including rejected ones so counts stay honest."""
+    """Record a conversation, including rejected ones so counts stay honest.
+
+    One row per session: re-ingesting overwrites it with the latest version,
+    including the provider's raw payload (serialised to JSON text here).
+    """
+    raw_json = None if raw_payload is None else json.dumps(raw_payload, ensure_ascii=False)
     conn.execute(
         _sql("""
-            INSERT INTO conversations (session_id, source_file, status, note, ingested_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO conversations
+                (session_id, source_file, status, note, ingested_at, source_type, raw_payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (session_id) DO UPDATE SET
                 source_file = excluded.source_file,
                 status      = excluded.status,
                 note        = excluded.note,
-                ingested_at = excluded.ingested_at
+                ingested_at = excluded.ingested_at,
+                source_type = excluded.source_type,
+                raw_payload = excluded.raw_payload
             """),
-        (session_id, source_file, status.value, note, utcnow_iso()),
+        (session_id, source_file, status.value, note, utcnow_iso(), source_type, raw_json),
     )
+
+
+def get_conversation_record(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
+    """The stored conversation row, with ``raw_payload`` still as JSON text."""
+    cur = conn.execute(_sql("SELECT * FROM conversations WHERE session_id = ?"), (session_id,))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def delete_turns(conn: sqlite3.Connection, session_id: str) -> int:
+    """Remove every turn for a session. Returns the number of rows deleted."""
+    cur = conn.execute(_sql("DELETE FROM turns WHERE session_id = ?"), (session_id,))
+    return cur.rowcount
 
 
 def replace_turns(conn: sqlite3.Connection, session_id: str, turns: Iterable[Turn]) -> int:
     """Delete and rewrite this conversation's turns. Returns the count written."""
-    conn.execute(_sql("DELETE FROM turns WHERE session_id = ?"), (session_id,))
+    delete_turns(conn, session_id)
     payload = [(t.session_id, t.pair_index, t.caller_asked, t.agent_said) for t in turns]
     conn.executemany(
         _sql("""
