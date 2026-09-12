@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Step 1 Inspector</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Step 1 Inspector</h1>
+    <p class="subtitle">Read-only view of ingestion &amp; normalization results</p>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab is-active" data-panel="overview">Overview</button>
+    <button class="tab" data-panel="conversations">Conversations</button>
+    <button class="tab" data-panel="quarantine">Quarantine</button>
+  </nav>
+
+  <p id="error" class="error" hidden></p>
+
+  <!-- Overview -->
+  <section id="panel-overview" class="panel">
+    <div class="cards">
+      <div class="card">
+        <span class="card-label">Conversations accepted</span>
+        <span class="card-value" id="stat-conversations">-</span>
+      </div>
+      <div class="card">
+        <span class="card-label">Turns stored</span>
+        <span class="card-value" id="stat-turns">-</span>
+      </div>
+      <div class="card">
+        <span class="card-label">Quarantined records</span>
+        <span class="card-value" id="stat-quarantine">-</span>
+      </div>
+    </div>
+    <button id="refresh" class="refresh">Refresh</button>
+  </section>
+
+  <!-- Conversations -->
+  <section id="panel-conversations" class="panel" hidden>
+    <div class="split">
+      <aside class="session-list">
+        <h2>Sessions</h2>
+        <ul id="session-list"></ul>
+      </aside>
+      <div class="turns">
+        <h2 id="turns-heading">Select a session</h2>
+        <table id="turns-table" hidden>
+          <thead>
+            <tr><th class="narrow">#</th><th>caller_asked</th><th>agent_said</th></tr>
+          </thead>
+          <tbody id="turns-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quarantine -->
+  <section id="panel-quarantine" class="panel" hidden>
+    <h2>Quarantined records</h2>
+    <table>
+      <thead>
+        <tr><th class="narrow">id</th><th>session_id</th><th>reason</th><th>created_at</th><th>payload</th></tr>
+      </thead>
+      <tbody id="quarantine-body"></tbody>
+    </table>
+    <p id="quarantine-empty" class="empty" hidden>No quarantined records.</p>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

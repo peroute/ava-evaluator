@@ -1,0 +1,10 @@
+# Step 1 pipeline (main.py) uses the Python standard library only.
+# The extras below are needed only for the read-only inspection dashboard
+# (run_dashboard.py) and its tests.
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27        # used by fastapi.testclient in tests/test_api.py
+
+# Optional test runner - the suite also runs with:
+#   python -m unittest discover tests
+# pytest
