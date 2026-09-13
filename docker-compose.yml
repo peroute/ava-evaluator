@@ -35,7 +35,11 @@ services:
       # 5433, not 5432: a natively installed PostgreSQL usually owns 5432, and
       # connections would silently go to it instead ("password authentication
       # failed"). Containers still reach this database at db:5432.
-      - "${AVA_DB_PORT:-5433}:5432"
+      #
+      # 127.0.0.1 only: without it Docker listens on every network interface,
+      # and anyone on the same Wi-Fi could log in with the default superuser
+      # password.
+      - "127.0.0.1:${AVA_DB_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
@@ -62,7 +66,9 @@ services:
       - -c
       - python -m ava_eval migrate && exec uvicorn ava_eval.api.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8000:8000"
+      # 127.0.0.1 only, so the API is reachable from this machine and not from
+      # the rest of the network.
+      - "127.0.0.1:8000:8000"
     volumes:
       # Lets `make_sample_kb.py`, `ingest` and `index-kb` see and write the
       # sample data on your machine without rebuilding the image.

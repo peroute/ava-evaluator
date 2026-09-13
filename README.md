@@ -53,7 +53,7 @@ Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) runni
 
 ```powershell
 copy .env.example .env         # works offline as-is; add a key when going live
-docker compose up --build      # Postgres + migrations + API on http://localhost:8000
+docker compose up --build      # Postgres + migrations + API on http://127.0.0.1:8000
 ```
 
 In a second terminal, run the pipeline inside the same image:
@@ -76,7 +76,7 @@ python -m venv .venv
 pip install -r requirements-dev.txt
 
 copy .env.example .env
-docker compose up -d db        # just the database, on localhost:5433
+docker compose up -d db        # just the database, on 127.0.0.1:5433
 python scripts\make_sample_kb.py
 
 python -m ava_eval migrate
@@ -216,6 +216,10 @@ in the new migration.
 
 ### Docker gotchas
 
+- The database (5433) and the API (8000) are published on **`127.0.0.1` only**,
+  so nothing else on your network can reach them. Connect with `127.0.0.1`,
+  not `localhost`: `localhost` tries IPv6 (`::1`) first, where nothing is
+  listening, and each connection stalls until that attempt times out.
 - Inside compose, the database host is **`db`**, not `localhost` —
   `docker-compose.yml` sets `DATABASE_URL` for the containers accordingly.
 - The `api` container runs `migrate` before starting uvicorn, so

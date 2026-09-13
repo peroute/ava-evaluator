@@ -78,9 +78,12 @@ class Settings:
             # Defaults match docker-compose.yml, so a fresh clone works against
             # `docker compose up -d db` with no .env at all. Inside compose the
             # host is `db`, and compose overrides this variable for that reason.
-            database_url=os.getenv("DATABASE_URL", "postgresql://ava:ava@localhost:5433/ava_eval"),
+            # 127.0.0.1, not localhost: compose publishes the database on IPv4
+            # loopback only, and `localhost` tries IPv6 (::1) first -- which
+            # stalls until that attempt times out before falling back.
+            database_url=os.getenv("DATABASE_URL", "postgresql://ava:ava@127.0.0.1:5433/ava_eval"),
             test_database_url=os.getenv(
-                "AVA_TEST_DATABASE_URL", "postgresql://ava:ava@localhost:5433/ava_eval_test"
+                "AVA_TEST_DATABASE_URL", "postgresql://ava:ava@127.0.0.1:5433/ava_eval_test"
             ),
             stub_llm=_env_bool("AVA_STUB_LLM", True),
             stub_embed=_env_bool("AVA_STUB_EMBED", True),
