@@ -63,7 +63,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         for name, reason in report.unreadable_files:
             print(f"  ! {name}: {reason}")
 
-    return 0 if report.accepted else 1
+    if report.failed:
+        print(f"\nFailed to store ({len(report.failed)}), each rolled back")
+        for name, reason in report.failed:
+            print(f"  ! {name}: {reason}")
+
+    return 0 if report.accepted and not report.failed else 1
 
 
 def cmd_index_kb(args: argparse.Namespace) -> int:

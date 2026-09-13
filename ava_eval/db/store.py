@@ -166,25 +166,44 @@ def upsert_conversation(
     source_file: str,
     status: ConversationStatus,
     note: str = "",
+    *,
+    source_type: str = "json_export",
 ) -> None:
-    """Record a conversation, including rejected ones so counts stay honest."""
+    """Record a conversation, including rejected ones so counts stay honest.
+
+    One row per session: re-ingesting overwrites it with the latest version.
+    ``source_type`` names the transcript source that produced it.
+    """
     conn.execute(
         """
-        INSERT INTO conversations (session_id, source_file, status, note, ingested_at)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO conversations (session_id, source_file, status, note, ingested_at, source_type)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (session_id) DO UPDATE SET
             source_file = excluded.source_file,
             status      = excluded.status,
             note        = excluded.note,
-            ingested_at = excluded.ingested_at
+            ingested_at = excluded.ingested_at,
+            source_type = excluded.source_type
         """,
-        (session_id, source_file, status.value, note, utcnow()),
+        (session_id, source_file, status.value, note, utcnow(), source_type),
     )
+
+
+def get_conversation_record(conn: Connection, session_id: str) -> dict[str, Any] | None:
+    """The stored conversation row as a dict, or None if the session is unknown."""
+    return conn.execute(
+        "SELECT * FROM conversations WHERE session_id = %s", (session_id,)
+    ).fetchone()
+
+
+def delete_turns(conn: Connection, session_id: str) -> int:
+    """Remove every turn for a session. Returns the number of rows deleted."""
+    return conn.execute("DELETE FROM turns WHERE session_id = %s", (session_id,)).rowcount
 
 
 def replace_turns(conn: Connection, session_id: str, turns: Iterable[Turn]) -> int:
     """Delete and rewrite this conversation's turns. Returns the count written."""
-    conn.execute("DELETE FROM turns WHERE session_id = %s", (session_id,))
+    delete_turns(conn, session_id)
     payload = [(t.session_id, t.pair_index, t.caller_asked, t.agent_said) for t in turns]
     with conn.cursor() as cur:
         cur.executemany(
