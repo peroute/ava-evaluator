@@ -19,18 +19,18 @@ meaningless `NOT_FOUND` that inflates the gap numbers.
 |---|---|
 | **Reads** | a conversation's `Turn`s (from step 1) |
 | **LLM returns** | [`TurnClassification`](../../ava_eval/models.py#L124): `contains_claims: bool`, `reason: str` |
-| **Produces** | [`ClassifiedTurn`](../../ava_eval/models.py#L136) (same fields + `session_id`, `pair_index`) |
+| **Produces** | [`ClassifiedTurn`](../../ava_eval/models.py#L140) (same fields + `session_id`, `pair_index`) |
 | **Writes** | `turn_classifications`, via [`store.save_classifications`](../../ava_eval/db/store.py#L406) (upsert, so re-running overwrites) |
 
 ## How the code works
 
-1. [`pipeline.evaluate`](../../ava_eval/pipeline.py#L102) calls [`classify_turns(turns)`](../../ava_eval/steps/s3_classify.py#L115).
-2. `classify_turns` loops over the turns **one at a time, in order**, calling [`classify_turn`](../../ava_eval/steps/s3_classify.py#L108).
+1. [`pipeline.evaluate`](../../ava_eval/pipeline.py#L102) calls [`classify_turns(turns)`](../../ava_eval/steps/s3_classify.py#L111).
+2. `classify_turns` loops over the turns **one at a time, in order**, calling [`classify_turn`](../../ava_eval/steps/s3_classify.py#L104).
 3. `classify_turn` is a switch: `settings.stub_llm` → `_classify_stub`, otherwise `_classify_live`. Steps 4 and 6
    use the same pattern.
 4. The pipeline saves the results and builds a `pair_index → ClassifiedTurn` dict (`by_index`) for step 4.
 
-The live version (still to be written) is about four lines:
+The live version is:
 
 ```python
 prompt = load_prompt("classify_turn", caller_asked=turn.caller_asked, agent_said=turn.agent_said)
@@ -40,13 +40,14 @@ return generate_structured(prompt, TurnClassification)
 [`load_prompt`](../../ava_eval/llm/__init__.py#L10) fills the `{{CALLER_ASKED}}` / `{{AGENT_SAID}}` placeholders and
 raises if one is missing or left unfilled. [`generate_structured`](../../ava_eval/llm/client.py#L191) makes Gemini
 answer in exactly the `TurnClassification` JSON shape (structured output), at temperature 0 with retries, and
-validates the reply before returning it.
+validates the reply before returning it. `contains_claims` is parsed strictly, so only a JSON `true`/`false`
+is accepted — a string such as `"yes"` fails validation instead of being quietly turned into a bool.
 
 ## Stub vs live
 
 | `AVA_STUB_LLM=1` (default) | `AVA_STUB_LLM=0` |
 |---|---|
-| [`_classify_stub`](../../ava_eval/steps/s3_classify.py#L46): splits into sentences, drops ones that match filler patterns ("hi", "thanks", "let me…"), and says `true` if what's left contains fact-like words (GPA, credit, deadline, a digit…). | [`_classify_live`](../../ava_eval/steps/s3_classify.py#L77) — **not implemented yet**, raises `NotImplementedError`. |
+| [`_classify_stub`](../../ava_eval/steps/s3_classify.py#L50): splits into sentences, drops ones that match filler patterns ("hi", "thanks", "let me…"), and says `true` if what's left contains fact-like words (GPA, credit, deadline, a digit…). | [`_classify_live`](../../ava_eval/steps/s3_classify.py#L81): fills the prompt with this one turn and calls `generate_structured`. |
 
 The stub is deliberately the approach the design *rejected*. "Feel free to call back any time" and "You can defer
 enrollment for one term" have the same shape, and only one is a fact. No keyword list reliably separates them.
@@ -56,6 +57,8 @@ The stub only needs to produce varied, repeatable output so the rest of the pipe
 
 - **Deliberately over-inclusive.** A reply that states a fact *and* asks a follow-up question is `true`. When unsure,
   `true`. Step 4 can drop a false positive (it returns an empty claim list), but it never even sees a turn this step rejected.
+- **Presence, not correctness.** A wrong fact ("the minimum GPA is 9.5") or a hedged one ("I believe the deadline is
+  March 1") is still `true`. Whether it is right is step 6's question; this step never looks at the KB.
 - **No conversation history is sent.** Whether a sentence is a greeting doesn't depend on earlier turns, so history
   would cost tokens and buy nothing. Step 4 is the step that needs history.
 - **Use the cheapest model you trust here.** It runs once per turn, which makes it the highest-volume call in the pipeline.
@@ -69,8 +72,13 @@ The stub only needs to produce varied, repeatable output so the rest of the pipe
 
 ## Tests
 
-No dedicated test file yet. The rollup tests in [`tests/test_retrieve_and_rollup.py`](../../tests/test_retrieve_and_rollup.py)
-check how classifications surface (`NOT_EVALUATED` / `NO_CLAIMS` turns are labelled, not dropped), and
+[`tests/test_classify.py`](../../tests/test_classify.py) covers the contract: greeting / closing / clarifying
+question → `false`; fact, fact + filler, wrong fact, hedged fact → `true` (stub, and the live path with a scripted
+`generate_structured`); strict boolean parsing; one turn per prompt, no history; and, through
+`pipeline.evaluate` on the Postgres test database, that every turn's classification is stored as a boolean, `false`
+turns stay stored, and only `true` turns get claims. The rollup tests in
+[`tests/test_retrieve_and_rollup.py`](../../tests/test_retrieve_and_rollup.py) check how classifications surface
+(`NOT_EVALUATED` / `NO_CLAIMS` turns are labelled, not dropped), and
 [`test_every_prompt_template_is_loadable`](../../tests/test_judge_policy.py#L223) covers the prompt.
 
 ## Connects to
