@@ -11,8 +11,6 @@ venv/
 
 # Local data
 data/
-*.db
-*.sqlite3
 
 # Generated sample KB (rebuild with scripts/make_sample_kb.py)
 sample_data/kb/*.docx

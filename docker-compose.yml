@@ -1,0 +1,69 @@
+# Local stack: PostgreSQL + pgvector, a one-shot migration, and the API.
+#
+#   docker compose up --build          start everything (API on :8000)
+#   docker compose up -d db            just the database (for pytest / local CLI)
+#   docker compose run --rm api python -m ava_eval evaluate
+#   docker compose down                stop; data survives in the pgdata volume
+#   docker compose down -v             stop AND delete all data
+#
+# ${VAR:-default} values come from your shell or .env, with the defaults below.
+
+name: ava-evaluator
+
+# Shared settings for every container that runs our Python image.
+x-app: &app
+  build: .
+  image: ava-evaluator:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # Inside the compose network the database's hostname is the service name
+    # `db` -- `localhost` would mean "this container". This overrides whatever
+    # DATABASE_URL your .env sets for running things on your own machine.
+    DATABASE_URL: postgresql://${POSTGRES_USER:-ava}:${POSTGRES_PASSWORD:-ava}@db:5432/${POSTGRES_DB:-ava_eval}
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ava}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ava}
+      POSTGRES_DB: ${POSTGRES_DB:-ava_eval}
+    ports:
+      # Published so pytest and the CLI on your machine can reach it. Host port
+      # 5433, not 5432: a natively installed PostgreSQL usually owns 5432, and
+      # connections would silently go to it instead ("password authentication
+      # failed"). Containers still reach this database at db:5432.
+      - "${AVA_DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "ava_eval", "migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app
+    ports:
+      - "8000:8000"
+    volumes:
+      # Lets `make_sample_kb.py`, `ingest` and `index-kb` see and write the
+      # sample data on your machine without rebuilding the image.
+      - ./sample_data:/app/sample_data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
