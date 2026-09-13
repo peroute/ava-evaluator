@@ -212,6 +212,12 @@ in the new migration.
 
 - Inside compose, the database host is **`db`**, not `localhost` —
   `docker-compose.yml` sets `DATABASE_URL` for the containers accordingly.
+- The `api` container runs `migrate` before starting uvicorn, so
+  `docker compose up` always brings the schema up to date. `docker compose run
+  --rm api <command>` replaces that startup command and does **not** migrate: on
+  a fresh volume, run `docker compose up` once first (or
+  `docker compose run --rm api python -m ava_eval migrate`). This setup assumes a
+  single API container — with several, move migration to its own deploy step.
 - `docker/postgres/init.sql` (creates `ava_eval_test`, enables pgvector) runs
   **only when the data volume is first created**. After editing it:
   `docker compose down -v` (this deletes all data).
@@ -239,7 +245,7 @@ ava_eval/
   api/main.py      read-only FastAPI for the frontend
 docker/postgres/   first-boot database init script
 Dockerfile         one image: API, migrations and CLI
-docker-compose.yml db + migrate + api
+docker-compose.yml db + api (api migrates on startup)
 ```
 
 ## Tests

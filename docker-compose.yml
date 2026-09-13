@@ -1,4 +1,4 @@
-# Local stack: PostgreSQL + pgvector, a one-shot migration, and the API.
+# Local stack: PostgreSQL + pgvector, and the API (which migrates on startup).
 #
 #   docker compose up --build          start everything (API on :8000)
 #   docker compose up -d db            just the database (for pytest / local CLI)
@@ -45,16 +45,22 @@ services:
       timeout: 5s
       retries: 15
 
-  migrate:
-    <<: *app
-    command: ["python", "-m", "ava_eval", "migrate"]
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: "no"
-
   api:
     <<: *app
+    # Migrate, then serve. `&&` means the API never starts on a failed
+    # migration; re-running it on every start is a no-op once the schema is
+    # current. `exec` makes uvicorn replace the shell so it receives SIGTERM
+    # from `docker compose down` and shuts down cleanly instead of being killed.
+    #
+    # Fine while there is ONE api container. With several replicas they would
+    # all migrate at once and race; move migration to a one-shot deploy step then.
+    #
+    # `docker compose run --rm api <cmd>` replaces this command, so it does NOT
+    # migrate -- on a fresh volume, run `docker compose up` once first.
+    command:
+      - sh
+      - -c
+      - python -m ava_eval migrate && exec uvicorn ava_eval.api.main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
     volumes:
@@ -62,8 +68,8 @@ services:
       # sample data on your machine without rebuilding the image.
       - ./sample_data:/app/sample_data
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      db:
+        condition: service_healthy
 
 volumes:
   pgdata:
