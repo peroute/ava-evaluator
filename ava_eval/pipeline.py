@@ -13,13 +13,12 @@ arriving out of order from four.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from .db import store
 from .models import ConversationStatus, Verdict
 from .steps.s3_classify import classify_turns
 from .steps.s4_decompose import decompose_conversation, to_claims
-from .steps.s5_retrieve import load_index, retrieve_for_claims
+from .steps.s5_retrieve import retrieve_for_claims
 from .steps.s6_judge import judge_claims
 
 
@@ -54,13 +53,15 @@ class EvaluationReport:
         return [s for s in self.sessions if s.error]
 
 
-def evaluate(session_ids: list[str] | None = None, db_path: Path | None = None) -> EvaluationReport:
+def evaluate(
+    session_ids: list[str] | None = None, database_url: str | None = None
+) -> EvaluationReport:
     """Run steps 3-6 over the requested conversations.
 
     Args:
         session_ids: Which conversations to evaluate. Defaults to every accepted
             conversation in the database.
-        db_path: Override the configured database location.
+        database_url: Override the configured database.
 
     Returns:
         A per-conversation summary of what was judged.
@@ -72,9 +73,8 @@ def evaluate(session_ids: list[str] | None = None, db_path: Path | None = None) 
     """
     report = EvaluationReport()
 
-    with store.connect(db_path) as conn:
-        index = load_index(conn)
-        if index.size == 0:
+    with store.connect(database_url) as conn:
+        if store.count_chunks(conn) == 0:
             raise RuntimeError(
                 "The knowledge base index is empty. Run 'index-kb' first -- "
                 "judging against an empty index would report every claim as a "
@@ -86,37 +86,44 @@ def evaluate(session_ids: list[str] | None = None, db_path: Path | None = None) 
         for session_id in targets:
             result = SessionResult(session_id=session_id)
             try:
-                turns = store.get_turns(conn, session_id)
-                result.turn_count = len(turns)
-                if not turns:
-                    result.error = "no turns found (was it rejected at ingest?)"
-                    report.sessions.append(result)
-                    continue
+                # A savepoint per conversation. If anything below fails, only
+                # this conversation's writes are undone and the connection stays
+                # usable -- without it, PostgreSQL would refuse every statement
+                # for every remaining conversation after the first error.
+                with store.atomic(conn):
+                    turns = store.get_turns(conn, session_id)
+                    result.turn_count = len(turns)
+                    if not turns:
+                        result.error = "no turns found (was it rejected at ingest?)"
+                        report.sessions.append(result)
+                        continue
 
-                # Step 3 -- the cheap gate.
-                classifications = classify_turns(turns)
-                store.save_classifications(conn, classifications)
-                by_index = {c.pair_index: c for c in classifications}
-                result.flagged_turns = sum(1 for c in classifications if c.contains_claims)
+                    # Step 3 -- the cheap gate.
+                    classifications = classify_turns(turns)
+                    store.save_classifications(conn, classifications)
+                    by_index = {c.pair_index: c for c in classifications}
+                    result.flagged_turns = sum(1 for c in classifications if c.contains_claims)
 
-                # Step 4 -- one call for the whole conversation.
-                response = decompose_conversation(session_id, turns, by_index)
-                claims = to_claims(session_id, response, {t.pair_index for t in turns})
-                store.replace_claims_for_session(conn, session_id, claims)
-                result.claim_count = len(claims)
+                    # Step 4 -- one call for the whole conversation.
+                    response = decompose_conversation(session_id, turns, by_index)
+                    claims = to_claims(session_id, response, {t.pair_index for t in turns})
+                    store.replace_claims_for_session(conn, session_id, claims)
+                    result.claim_count = len(claims)
 
-                if not claims:
-                    report.sessions.append(result)
-                    continue
+                    if not claims:
+                        report.sessions.append(result)
+                        continue
 
-                # Step 5 -- per-claim retrieval, parallel across claims.
-                retrievals = retrieve_for_claims(conn, claims, index=index)
+                    # Step 5 -- per-claim retrieval, parallel across claims.
+                    retrievals = retrieve_for_claims(conn, claims)
 
-                # Step 6 -- verdicts, with the NOT_FOUND-only retry.
-                verdicts = judge_claims(conn, claims, retrievals, index=index)
-                result.supported = sum(1 for v in verdicts if v.verdict == Verdict.SUPPORTED)
-                result.contradicted = sum(1 for v in verdicts if v.verdict == Verdict.CONTRADICTED)
-                result.not_found = sum(1 for v in verdicts if v.verdict == Verdict.NOT_FOUND)
+                    # Step 6 -- verdicts, with the NOT_FOUND-only retry.
+                    verdicts = judge_claims(conn, claims, retrievals)
+                    result.supported = sum(1 for v in verdicts if v.verdict == Verdict.SUPPORTED)
+                    result.contradicted = sum(
+                        1 for v in verdicts if v.verdict == Verdict.CONTRADICTED
+                    )
+                    result.not_found = sum(1 for v in verdicts if v.verdict == Verdict.NOT_FOUND)
 
             except NotImplementedError as exc:
                 # A deliberate stub, not a bug. Surface it plainly.

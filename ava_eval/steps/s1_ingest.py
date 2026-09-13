@@ -147,12 +147,12 @@ def _fallback_session_id(payload: Any, source_file: str, position: int) -> str:
     return f"{source_file}#{position}"
 
 
-def ingest_directory(input_path: Path, db_path: Path | None = None) -> IngestReport:
+def ingest_directory(input_path: Path, database_url: str | None = None) -> IngestReport:
     """Ingest every transcript JSON under ``input_path`` into the database.
 
     Args:
         input_path: A directory of ``.json`` files, or a single ``.json`` file.
-        db_path: Override the configured database location.
+        database_url: Override the configured database.
 
     Returns:
         A report of what was accepted, rejected, and unreadable.
@@ -166,7 +166,7 @@ def ingest_directory(input_path: Path, db_path: Path | None = None) -> IngestRep
     files = sorted(input_path.glob("*.json")) if input_path.is_dir() else [input_path]
     report = IngestReport()
 
-    with store.connect(db_path) as conn:
+    with store.connect(database_url) as conn:
         for file_path in files:
             name = file_path.name
             try:

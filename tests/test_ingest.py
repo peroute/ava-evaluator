@@ -97,7 +97,7 @@ def test_rejects_boolean_pair_index() -> None:
         parse_export_v1(payload, "file.json")
 
 
-def test_bad_conversation_does_not_stop_the_batch(tmp_path: Path, db_path: Path) -> None:
+def test_bad_conversation_does_not_stop_the_batch(tmp_path: Path, db_url: str) -> None:
     """The whole reason rejections are recorded instead of raised."""
     source = tmp_path / "transcripts"
     source.mkdir()
@@ -107,36 +107,36 @@ def test_bad_conversation_does_not_stop_the_batch(tmp_path: Path, db_path: Path)
     )
     (source / "broken.json").write_text("{not json", encoding="utf-8")
 
-    report = ingest_directory(source, db_path=db_path)
+    report = ingest_directory(source, database_url=db_url)
 
     assert [c.session_id for c in report.accepted] == ["good_1"]
     assert [r.session_id for r in report.rejected] == ["bad_1"]
     assert [name for name, _ in report.unreadable_files] == ["broken.json"]
 
     # The rejected conversation is still recorded, so turn counts stay honest.
-    with store.connect(db_path) as conn:
+    with store.connect(db_url) as conn:
         assert store.list_sessions(conn, ConversationStatus.ACCEPTED) == ["good_1"]
         assert store.list_sessions(conn, ConversationStatus.REJECTED) == ["bad_1"]
 
 
-def test_accepts_a_json_array_of_conversations(tmp_path: Path, db_path: Path) -> None:
+def test_accepts_a_json_array_of_conversations(tmp_path: Path, db_url: str) -> None:
     source = tmp_path / "transcripts"
     source.mkdir()
     payload = [_conversation("a_1"), _conversation("a_2")]
     (source / "batch.json").write_text(json.dumps(payload), encoding="utf-8")
 
-    report = ingest_directory(source, db_path=db_path)
+    report = ingest_directory(source, database_url=db_url)
     assert sorted(c.session_id for c in report.accepted) == ["a_1", "a_2"]
 
 
-def test_reingesting_replaces_turns(tmp_path: Path, db_path: Path) -> None:
+def test_reingesting_replaces_turns(tmp_path: Path, db_url: str) -> None:
     """Re-running step 1 must not accumulate duplicate turns."""
     source = tmp_path / "transcripts"
     source.mkdir()
     (source / "c.json").write_text(json.dumps(_conversation("c_1")), encoding="utf-8")
 
-    ingest_directory(source, db_path=db_path)
-    ingest_directory(source, db_path=db_path)
+    ingest_directory(source, database_url=db_url)
+    ingest_directory(source, database_url=db_url)
 
-    with store.connect(db_path) as conn:
+    with store.connect(db_url) as conn:
         assert len(store.get_turns(conn, "c_1")) == 2

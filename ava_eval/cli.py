@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import PROJECT_ROOT, settings
 from .db import store
+from .db.migrate import upgrade_to_head
 from .pipeline import evaluate
 from .steps.s1_ingest import ingest_directory
 from .steps.s2_index_kb import index_knowledge_base
@@ -37,16 +38,15 @@ def _mode_banner() -> str:
     return " ".join(parts) + "  <- offline mode, results are not real verdicts"
 
 
-def cmd_init_db(args: argparse.Namespace) -> int:
-    """Create the tables and views."""
-    path = store.init_db()
-    print(f"Database ready at {path}")
+def cmd_migrate(args: argparse.Namespace) -> int:
+    """Bring the database schema up to the latest Alembic migration."""
+    upgrade_to_head()
+    print("Database schema is up to date.")
     return 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     """Step 1: parse and validate transcripts."""
-    store.init_db()
     report = ingest_directory(Path(args.input))
 
     print(f"Accepted {len(report.accepted)} conversations ({report.turn_count} turns)")
@@ -68,7 +68,6 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_index_kb(args: argparse.Namespace) -> int:
     """Step 2: extract, chunk and embed the knowledge base."""
-    store.init_db()
     print(f"Indexing mode: {_mode_banner()}")
     report = index_knowledge_base(Path(args.kb_dir), force=args.force)
 
@@ -135,9 +134,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init-db", help="create the database tables and views").set_defaults(
-        func=cmd_init_db
-    )
+    subparsers.add_parser(
+        "migrate", help="create or upgrade the database schema (Alembic)"
+    ).set_defaults(func=cmd_migrate)
 
     ingest = subparsers.add_parser("ingest", help="step 1: load transcript JSON")
     ingest.add_argument(

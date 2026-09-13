@@ -1,7 +1,7 @@
 """Step 7 — roll claim verdicts up to turn and conversation level, and report.
 
 There is almost no logic in this module, and that is the design working. The
-rollups live in SQL views (``db/schema.sql``), so claim, turn and conversation
+rollups live in SQL views (the Alembic migrations in ``db/migrations``), so claim, turn and conversation
 level results are three readings of one set of rows rather than three copies
 that can disagree. This file only reads them and formats them.
 
@@ -15,10 +15,10 @@ confirm, which is usually a TTU content problem. Collapsing them into one
 
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 from ..db import store
+from ..db.store import Connection
 
 # Ordered worst-first, which is the order a reviewer wants to read them in.
 VERDICT_ORDER = ["CONTRADICTED", "NOT_FOUND", "SUPPORTED"]
@@ -33,7 +33,7 @@ _LABELS = {
 }
 
 
-def conversation_report(conn: sqlite3.Connection, session_id: str | None = None) -> dict[str, Any]:
+def conversation_report(conn: Connection, session_id: str | None = None) -> dict[str, Any]:
     """Assemble the full report payload: totals, per-conversation, per-claim."""
     return {
         "stats": store.verdict_stats(conn),
