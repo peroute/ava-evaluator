@@ -124,11 +124,15 @@ class KbChunk(BaseModel):
 class TurnClassification(BaseModel):
     """Gemini's answer to 'does this turn contain anything checkable?'."""
 
+    # strict: only a JSON true/false is accepted. Without it pydantic would also
+    # turn strings such as "yes" or "false" into a bool, hiding a reply that did
+    # not follow the schema.
     contains_claims: bool = Field(
+        strict=True,
         description=(
             "True if ANY part of the agent's reply states a checkable fact about "
             "TTU, even if the rest of the reply is filler or a follow-up question."
-        )
+        ),
     )
     reason: str = Field(description="One short sentence justifying the decision.")
 

@@ -1,4 +1,4 @@
-"""Step 3 — decide which turns contain anything worth checking.  [STUB]
+"""Step 3 — decide which turns contain anything worth checking.
 
 A cheap gate in front of the expensive steps. Without it, every greeting and
 "let me connect you" burns a decomposition and a judge call, and — worse —
@@ -9,8 +9,12 @@ The gate is deliberately coarse: a reply that states a fact *and* then asks a
 follow-up question is still `true`. Separating claim from filler precisely is
 step 4's job, and step 4 can only do it for turns this step lets through.
 
-IMPLEMENTATION STATUS: stubbed. ``_classify_stub`` runs offline;
-``_classify_live`` is yours to write.
+This step only asks *whether* a checkable claim is present. It does not decide
+whether the claim is true, look anything up in the knowledge base, or pull the
+individual claims out; those are steps 4-6.
+
+``_classify_stub`` runs offline (``AVA_STUB_LLM=1``); ``_classify_live`` asks
+Gemini.
 """
 
 from __future__ import annotations
@@ -77,32 +81,24 @@ def _classify_stub(turn: Turn) -> TurnClassification:
 def _classify_live(turn: Turn) -> TurnClassification:
     """Ask Gemini whether this turn contains a checkable claim.
 
-    TODO(hedi): implement. It is roughly four lines::
-
-        prompt = load_prompt(
-            "classify_turn",
-            caller_asked=turn.caller_asked,
-            agent_said=turn.agent_said,
-        )
-        return generate_structured(prompt, TurnClassification)
-
-    Things worth knowing before you write it:
-
-    * ``generate_structured`` already handles retries, temperature 0, and
-      validating the reply against ``TurnClassification``. If it returns, you
-      have a well-formed object — no parsing, no defensive checks needed.
-    * The prompt is already written at ``llm/prompts/classify_turn.md``,
-      including the over-inclusive rule and its worked examples.
-    * This is the one step that needs no conversation history. Deciding whether
-      a sentence is a greeting does not depend on what came before it, so
-      sending history here would cost tokens and buy nothing.
-    * Pick the cheapest model you are willing to trust for this — it runs once
-      per turn, which makes it the highest-volume call in the pipeline.
+    * ``generate_structured`` handles retries, temperature 0, and validating the
+      reply against ``TurnClassification``. If it returns, the object is
+      well-formed and ``contains_claims`` is a real bool.
+    * The prompt at ``llm/prompts/classify_turn.md`` carries the over-inclusive
+      rule and its worked examples.
+    * Only this turn is sent. Deciding whether a sentence is a greeting does not
+      depend on earlier turns, so history would cost tokens and buy nothing. The
+      caller's question is included as context for reading the reply; the
+      decision is about the reply.
+    * It runs once per turn, which makes it the highest-volume call in the
+      pipeline; it uses the configured model.
     """
-    raise NotImplementedError(
-        "Step 3 is not implemented yet. Run with AVA_STUB_LLM=1, or implement "
-        "_classify_live in ava_eval/steps/s3_classify.py."
+    prompt = load_prompt(
+        "classify_turn",
+        caller_asked=turn.caller_asked,
+        agent_said=turn.agent_said,
     )
+    return generate_structured(prompt, TurnClassification)
 
 
 def classify_turn(turn: Turn) -> TurnClassification:
