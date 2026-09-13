@@ -1,0 +1,81 @@
+# Local stack: PostgreSQL + pgvector, and the API (which migrates on startup).
+#
+#   docker compose up --build          start everything (API on :8000)
+#   docker compose up -d db            just the database (for pytest / local CLI)
+#   docker compose run --rm api python -m ava_eval evaluate
+#   docker compose down                stop; data survives in the pgdata volume
+#   docker compose down -v             stop AND delete all data
+#
+# ${VAR:-default} values come from your shell or .env, with the defaults below.
+
+name: ava-evaluator
+
+# Shared settings for every container that runs our Python image.
+x-app: &app
+  build: .
+  image: ava-evaluator:local
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # Inside the compose network the database's hostname is the service name
+    # `db` -- `localhost` would mean "this container". This overrides whatever
+    # DATABASE_URL your .env sets for running things on your own machine.
+    DATABASE_URL: postgresql://${POSTGRES_USER:-ava}:${POSTGRES_PASSWORD:-ava}@db:5432/${POSTGRES_DB:-ava_eval}
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ava}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ava}
+      POSTGRES_DB: ${POSTGRES_DB:-ava_eval}
+    ports:
+      # Published so pytest and the CLI on your machine can reach it. Host port
+      # 5433, not 5432: a natively installed PostgreSQL usually owns 5432, and
+      # connections would silently go to it instead ("password authentication
+      # failed"). Containers still reach this database at db:5432.
+      #
+      # 127.0.0.1 only: without it Docker listens on every network interface,
+      # and anyone on the same Wi-Fi could log in with the default superuser
+      # password.
+      - "127.0.0.1:${AVA_DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  api:
+    <<: *app
+    # Migrate, then serve. `&&` means the API never starts on a failed
+    # migration; re-running it on every start is a no-op once the schema is
+    # current. `exec` makes uvicorn replace the shell so it receives SIGTERM
+    # from `docker compose down` and shuts down cleanly instead of being killed.
+    #
+    # Fine while there is ONE api container. With several replicas they would
+    # all migrate at once and race; move migration to a one-shot deploy step then.
+    #
+    # `docker compose run --rm api <cmd>` replaces this command, so it does NOT
+    # migrate -- on a fresh volume, run `docker compose up` once first.
+    command:
+      - sh
+      - -c
+      - python -m ava_eval migrate && exec uvicorn ava_eval.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      # 127.0.0.1 only, so the API is reachable from this machine and not from
+      # the rest of the network.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Lets `make_sample_kb.py`, `ingest` and `index-kb` see and write the
+      # sample data on your machine without rebuilding the image.
+      - ./sample_data:/app/sample_data
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

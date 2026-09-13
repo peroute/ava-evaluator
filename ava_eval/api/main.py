@@ -1,8 +1,9 @@
 """Read-only HTTP layer for the TTU staff frontend.
 
-A browser cannot open a SQLite file, so results need HTTP regardless of what the
-frontend ends up being built with. Keeping that layer thin is the point: the
-filtering and the rollups are already SQL (``db/schema.sql``), so these handlers
+A browser cannot talk to PostgreSQL directly (and must never hold database
+credentials), so results need HTTP regardless of what the frontend ends up
+being built with. Keeping that layer thin is the point: the
+filtering and the rollups are already SQL views (``db/migrations``), so these handlers
 mostly translate query parameters into arguments and hand back rows. If the
 frontend ever needs to reimplement the severity rollup in JavaScript, something
 has gone wrong here.

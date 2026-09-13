@@ -13,6 +13,7 @@ only inherit Ava's blind spots without telling us anything about its retrieval.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from ..config import settings
@@ -37,14 +38,14 @@ class IndexReport:
 
 
 def index_knowledge_base(
-    kb_dir: Path, force: bool = False, db_path: Path | None = None
+    kb_dir: Path, force: bool = False, database_url: str | None = None
 ) -> IndexReport:
     """Index every .docx in ``kb_dir``.
 
     Args:
         kb_dir: Directory holding the knowledge base documents.
         force: Re-index even documents whose content hash is unchanged.
-        db_path: Override the configured database location.
+        database_url: Override the configured database.
 
     Returns:
         A report naming what was indexed, skipped, and what failed.
@@ -60,13 +61,30 @@ def index_knowledge_base(
     documents = sorted(p for p in kb_dir.glob("*.docx") if not p.name.startswith("~$"))
     report = IndexReport()
 
-    with store.connect(db_path) as conn:
+    with store.connect(database_url) as conn:
         for path in documents:
             doc_id = slugify(path.stem)
             try:
                 blocks = extract_docx(path)
             except (FileNotFoundError, ValueError, OSError) as exc:
                 report.failed.append((path.name, str(exc)))
+                continue
+
+            # The column is a DATE, so a value like "Fall 2025" in kb_meta.json
+            # would be rejected by PostgreSQL -- and a failed statement aborts
+            # the whole indexing transaction. Checking here turns that into one
+            # failed document with a reason, like every other failure above.
+            raw_version_date = resolve_version_date(path, kb_dir)
+            try:
+                version_date = date.fromisoformat(raw_version_date)
+            except ValueError:
+                report.failed.append(
+                    (
+                        path.name,
+                        f"doc_version_date {raw_version_date!r} is not an ISO date "
+                        f"(YYYY-MM-DD) -- fix it in kb_meta.json",
+                    )
+                )
                 continue
 
             if not blocks:
@@ -107,7 +125,7 @@ def index_knowledge_base(
                 source_path=str(path),
                 source_doc=path.name,
                 content_hash=digest,
-                doc_version_date=resolve_version_date(path, kb_dir),
+                doc_version_date=version_date,
             )
             store.delete_chunks_for_doc(conn, doc_id)
             store.insert_chunks(conn, chunks, embeddings, settings.embed_model)

@@ -1,0 +1,5 @@
+# Local development and tests. Not installed in the Docker image.
+-r requirements.txt
+
+pytest>=8.0
+black>=24.0

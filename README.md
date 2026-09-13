@@ -47,36 +47,55 @@ KB documents ──▶ 2. index  (separate cadence: runs when the KB changes)
 
 ## Quick start
 
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) running.
+
+### Option A — everything in Docker
+
+```powershell
+copy .env.example .env         # works offline as-is; add a key when going live
+docker compose up --build      # Postgres + migrations + API on http://127.0.0.1:8000
+```
+
+In a second terminal, run the pipeline inside the same image:
+
+```powershell
+docker compose run --rm api python scripts/make_sample_kb.py
+docker compose run --rm api python -m ava_eval ingest
+docker compose run --rm api python -m ava_eval index-kb
+docker compose run --rm api python -m ava_eval evaluate
+docker compose run --rm api python -m ava_eval report
+```
+
+### Option B — Postgres in Docker, Python on your machine
+
+Faster edit-run loop while developing.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-copy .env.example .env         # works offline as-is; add a key when going live
+copy .env.example .env
+docker compose up -d db        # just the database, on 127.0.0.1:5433
 python scripts\make_sample_kb.py
 
-python -m ava_eval init-db
+python -m ava_eval migrate
 python -m ava_eval ingest
 python -m ava_eval index-kb
 python -m ava_eval evaluate
 python -m ava_eval report
-```
-
-That runs the whole pipeline with **no API key and no network calls**, on the
-sample data in `sample_data/`. See "Offline mode" below for what is real and
-what is faked.
-
-Then, for the frontend:
-
-```powershell
 python -m ava_eval serve       # http://127.0.0.1:8000  (interactive docs at /docs)
 ```
+
+Both run the whole pipeline with **no API key and no network calls**, on the
+sample data in `sample_data/`. See "Offline mode" below for what is real and
+what is faked.
 
 ## Commands
 
 | Command | Step | When you run it |
 |---|---|---|
-| `init-db` | — | Once, or after changing the schema |
+| `migrate` | — | After cloning, and whenever someone adds a migration |
 | `ingest --input DIR` | 1 | When new transcripts arrive |
 | `index-kb --kb-dir DIR [--force]` | 2 | When TTU edits a knowledge base document |
 | `evaluate [--session ID]` | 3–6 | To produce verdicts |
@@ -147,17 +166,77 @@ are incapable of disagreeing.
 friendlier chunk elsewhere in the KB, which is exactly how a real hallucination
 gets buried.
 
+**Vector search is exact, on purpose.** See Storage.
+
 ## Storage
 
-Everything lives in one SQLite file (`data/ava_eval.db` by default), including
-the vector index — embeddings are stored as `float32` blobs and searched with a
-numpy dot product. At knowledge-base scale that is sub-millisecond and costs
-zero extra infrastructure.
+PostgreSQL 17 with the [pgvector](https://github.com/pgvector/pgvector)
+extension, run locally by `docker compose`. All SQL lives in `ava_eval/db/store.py`;
+the schema lives in Alembic migrations.
 
-The schema is written to stay portable to PostgreSQL: explicit text ids,
-Python-generated timestamps, `ON CONFLICT` upserts, JSON as text, no SQLite-only
-functions. All SQL lives in `ava_eval/db/`, so the migration is one module plus
-swapping the similarity search for a `pgvector` `ORDER BY`.
+**Similarity search is exact.** Embeddings are stored unit-normalised in a
+`vector` column, and `store.search_chunks` orders by pgvector's inner-product
+operator (`<#>`). There is deliberately **no HNSW/IVFFlat index** on the
+column, so PostgreSQL compares every chunk. An approximate index is faster at
+very large scale but can skip a true nearest neighbour — and here a skipped
+chunk that supports a claim becomes a `NOT_FOUND` reported against Ava, our
+retrieval error disguised as hers. At knowledge-base scale an exact scan takes
+milliseconds; the Gemini calls around it take seconds. Revisit only past
+~100k chunks, and measure recall against exact search before trusting an index.
+
+**Native types and constraints.** Timestamps are `TIMESTAMPTZ`, document
+versions `DATE`, `contains_claims` `BOOLEAN`, `scope_derived_from` `JSONB`.
+`CHECK` constraints mirror the enums in `models.py`, so a typo'd verdict is
+rejected by the database instead of showing up in a report.
+
+**Time zone.** Timestamps are `TIMESTAMPTZ`: an absolute instant, written in UTC
+by `store.utcnow()`. They are *displayed* in Lubbock time (`America/Chicago`,
+so -05:00 in summer and -06:00 in winter). App connections take the zone from
+`AVA_DISPLAY_TIMEZONE`; migration `0002` makes it the database default, so
+pgAdmin and psql match (reconnect after migrating).
+
+**Transactions.** A failed statement in PostgreSQL aborts the rest of its
+transaction. `evaluate` wraps each conversation in a savepoint
+(`store.atomic`), so one bad conversation does not take down the batch.
+
+### Changing the schema
+
+Never edit a migration that has already been applied — add a new one:
+
+```powershell
+alembic revision -m "add reviewer_note to verdicts"   # creates ava_eval/db/migrations/versions/...
+# write upgrade() and downgrade() as op.execute("...") SQL, one statement per call
+python -m ava_eval migrate                             # apply it
+alembic downgrade -1                                   # undo it, if needed
+```
+
+Migrations are hand-written SQL (there are no SQLAlchemy models), so
+`--autogenerate` does not apply. To change a view, use `CREATE OR REPLACE VIEW`
+in the new migration.
+
+### Docker gotchas
+
+- The database (5433) and the API (8000) are published on **`127.0.0.1` only**,
+  so nothing else on your network can reach them. Connect with `127.0.0.1`,
+  not `localhost`: `localhost` tries IPv6 (`::1`) first, where nothing is
+  listening, and each connection stalls until that attempt times out.
+- Inside compose, the database host is **`db`**, not `localhost` —
+  `docker-compose.yml` sets `DATABASE_URL` for the containers accordingly.
+- The `api` container runs `migrate` before starting uvicorn, so
+  `docker compose up` always brings the schema up to date. `docker compose run
+  --rm api <command>` replaces that startup command and does **not** migrate: on
+  a fresh volume, run `docker compose up` once first (or
+  `docker compose run --rm api python -m ava_eval migrate`). This setup assumes a
+  single API container — with several, move migration to its own deploy step.
+- `docker/postgres/init.sql` (creates `ava_eval_test`, enables pgvector) runs
+  **only when the data volume is first created**. After editing it:
+  `docker compose down -v` (this deletes all data).
+- The database is published on host port **5433**, not the usual 5432. A
+  PostgreSQL installed directly on your machine typically owns 5432, and
+  connections would silently reach it instead of the container — the symptom is
+  `password authentication failed for user "ava"`. To use another port, set
+  `AVA_DB_PORT` in `.env` and update `DATABASE_URL` / `AVA_TEST_DATABASE_URL` to
+  match. Inside compose, containers always use `db:5432`.
 
 ## Layout
 
@@ -167,26 +246,39 @@ ava_eval/
   models.py        the contracts between steps (and the Gemini output schemas)
   pipeline.py      orchestrates steps 3-6
   cli.py           command line entry points
-  db/              schema.sql + store.py -- the ONLY module that speaks SQL
+  db/              store.py -- the ONLY module that speaks SQL
+    migrate.py     runs Alembic from Python (used by `migrate` and the tests)
+    migrations/    Alembic env + versioned schema migrations
   llm/             client.py + prompts/ -- the ONLY module that imports google.genai
   kb/              .docx extraction and semantic chunking
   steps/           s1_ingest ... s7_aggregate
   api/main.py      read-only FastAPI for the frontend
+docker/postgres/   first-boot database init script
+Dockerfile         one image: API, migrations and CLI
+docker-compose.yml db + api (api migrates on startup)
 ```
 
 ## Tests
 
 ```powershell
+docker compose up -d db
 python -m pytest
 ```
+
+Database tests run against a real PostgreSQL database, `ava_eval_test`, inside
+the compose container — never the `ava_eval` database holding your pipeline
+results. The suite migrates it once per run and empties every table before each
+test, and refuses to start if the configured test database's name does not end
+in `_test`.
 
 Runs fully offline — the test suite forces stub mode regardless of your `.env`,
 so it can never spend quota or fail for a missing key.
 
 Coverage focuses on the places where a bug produces plausible-looking output
 rather than a crash: transcript validation, table extraction from `.docx`,
-chunk overlap and section boundaries, retrieval ordering, the severity rollup,
-and the `NOT_FOUND`-only retry policy.
+chunk overlap and section boundaries, retrieval ordering (including a check that
+pgvector search matches a full brute-force comparison), the severity rollup,
+database constraints, and the `NOT_FOUND`-only retry policy.
 
 ## Not built yet (Phase 2)
 

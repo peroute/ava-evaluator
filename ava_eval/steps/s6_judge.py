@@ -26,16 +26,16 @@ is real and is what the stub exists to let you verify.
 from __future__ import annotations
 
 import re
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Sequence
 
 from ..config import settings
 from ..db import store
+from ..db.store import Connection
 from ..llm import load_prompt
 from ..llm.client import generate_structured
 from ..models import Claim, ClaimVerdict, JudgeResponse, RetrievedChunk, Verdict, VerdictTag
-from .s5_retrieve import KbIndex, retrieve_for_claims
+from .s5_retrieve import retrieve_for_claims
 
 _WORD_RE = re.compile(r"[a-z0-9.]+")
 _NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
@@ -218,10 +218,9 @@ def _to_verdict(
 
 
 def judge_claims(
-    conn: sqlite3.Connection,
+    conn: Connection,
     claims: Sequence[Claim],
     retrievals: dict[str, list[RetrievedChunk]],
-    index: KbIndex | None = None,
 ) -> list[ClaimVerdict]:
     """Judge a batch of claims, applying the NOT_FOUND retry policy.
 
@@ -229,7 +228,6 @@ def judge_claims(
         conn: An open database connection.
         claims: Claims to judge.
         retrievals: First-attempt chunks per claim id, from step 5.
-        index: A preloaded KB index, reused for the retry pass.
 
     Returns:
         One verdict per claim, persisted as a side effect.
@@ -264,7 +262,7 @@ def judge_claims(
 
     if needs_retry:
         wider_k = settings.top_k * settings.retry_k_multiplier
-        wider = retrieve_for_claims(conn, needs_retry, k=wider_k, attempt=2, index=index)
+        wider = retrieve_for_claims(conn, needs_retry, k=wider_k, attempt=2)
 
         for claim in needs_retry:
             original_ids = {c.chunk_id for c in retrievals.get(claim.claim_id, [])}
