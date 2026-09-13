@@ -100,7 +100,6 @@ def init_db(db_path: Path | None = None) -> Path:
 _ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "conversations": [
         ("source_type", "TEXT NOT NULL DEFAULT 'json_export'"),
-        ("raw_payload", "TEXT"),
     ],
 }
 
@@ -178,33 +177,29 @@ def upsert_conversation(
     note: str = "",
     *,
     source_type: str = "json_export",
-    raw_payload: Any = None,
 ) -> None:
     """Record a conversation, including rejected ones so counts stay honest.
 
-    One row per session: re-ingesting overwrites it with the latest version,
-    including the provider's raw payload (serialised to JSON text here).
+    One row per session: re-ingesting overwrites it with the latest version.
     """
-    raw_json = None if raw_payload is None else json.dumps(raw_payload, ensure_ascii=False)
     conn.execute(
         _sql("""
             INSERT INTO conversations
-                (session_id, source_file, status, note, ingested_at, source_type, raw_payload)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (session_id, source_file, status, note, ingested_at, source_type)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT (session_id) DO UPDATE SET
                 source_file = excluded.source_file,
                 status      = excluded.status,
                 note        = excluded.note,
                 ingested_at = excluded.ingested_at,
-                source_type = excluded.source_type,
-                raw_payload = excluded.raw_payload
+                source_type = excluded.source_type
             """),
-        (session_id, source_file, status.value, note, utcnow_iso(), source_type, raw_json),
+        (session_id, source_file, status.value, note, utcnow_iso(), source_type),
     )
 
 
 def get_conversation_record(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
-    """The stored conversation row, with ``raw_payload`` still as JSON text."""
+    """The stored conversation row as a dict, or None if the session is unknown."""
     cur = conn.execute(_sql("SELECT * FROM conversations WHERE session_id = ?"), (session_id,))
     row = cur.fetchone()
     return dict(row) if row else None

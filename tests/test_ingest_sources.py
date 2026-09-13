@@ -1,9 +1,9 @@
-"""Step 1 sources, raw payload preservation, and reprocessing.
+"""Step 1 sources and reprocessing.
 
 The validation rules themselves are covered in test_ingest.py. These tests are
-about the promises layered on top: the provider's original payload is kept, any
-source feeds the same validation, and re-ingesting a session always leaves the
-database describing its *latest* version, never a mix of old and new.
+about the promises layered on top: any source feeds the same validation, and
+re-ingesting a session always leaves the database describing its *latest*
+version, never a mix of old and new.
 """
 
 from __future__ import annotations
@@ -68,7 +68,6 @@ class FakeApiSource(TranscriptSource):
                 origin=f"api:{response.get('conversation_id')}",
                 source_type=self.name,
                 position=position,
-                raw_payload=response,
                 canonical_payload=self.to_canonical(response),
             )
 
@@ -140,22 +139,28 @@ def _count(db_path: Path, table: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Raw transcript storage
+# Conversation records
 # ---------------------------------------------------------------------------
 
 
-def test_raw_payload_is_preserved_with_extra_metadata(source_dir: Path, db_path: Path) -> None:
-    original = _conversation(
+def test_extra_provider_fields_are_not_persisted(source_dir: Path, db_path: Path) -> None:
+    """Only the canonical fields are used; the full provider payload is not stored."""
+    payload = _conversation(
         pairs=[_pair(0, asked="  padded  ")],
         metadata={"agent": "ava", "duration_secs": 12},
         call_outcome="resolved",
     )
-    _write(source_dir, "c.json", original)
+    _write(source_dir, "c.json", payload)
     ingest_directory(source_dir, db_path=db_path)
 
-    record = _record(db_path, "conv_1")
-    assert json.loads(record["raw_payload"]) == original
-    # The normalised turn is trimmed; the raw copy is not.
+    assert set(_record(db_path, "conv_1")) == {
+        "session_id",
+        "source_file",
+        "status",
+        "note",
+        "ingested_at",
+        "source_type",
+    }
     assert _turns(db_path) == [("conv_1", 0, "padded", "a")]
 
 
@@ -170,49 +175,37 @@ def test_source_type_is_stored(source_dir: Path, db_path: Path) -> None:
     assert api["source_file"] == "api:from_api"
 
 
-def test_raw_payload_is_stored_as_json_text(source_dir: Path, db_path: Path) -> None:
-    _write(source_dir, "c.json", _conversation())
-    ingest_directory(source_dir, db_path=db_path)
-    with store.connect(db_path) as conn:
-        kind = conn.execute("SELECT typeof(raw_payload) FROM conversations").fetchone()[0]
-    assert kind == "text"
-
-
-def test_rejected_conversation_keeps_raw_payload_and_reason(
+def test_rejected_conversation_keeps_reason_and_source_type(
     source_dir: Path, db_path: Path
 ) -> None:
-    bad = _conversation("bad_1", pairs=[_pair(0), _pair(2)])
-    _write(source_dir, "bad.json", bad)
+    _write(source_dir, "bad.json", _conversation("bad_1", pairs=[_pair(0), _pair(2)]))
     ingest_directory(source_dir, db_path=db_path)
 
     record = _record(db_path, "bad_1")
     assert record["status"] == ConversationStatus.REJECTED.value
     assert "sequential" in record["note"]
-    assert json.loads(record["raw_payload"]) == bad
+    assert record["source_type"] == "json_export"
 
 
 def test_rejected_payload_without_session_id_is_kept_under_fallback_id(
     source_dir: Path, db_path: Path
 ) -> None:
-    payload = {"raw_pairs": [_pair(0)], "provider_metadata": {"x": 1}}
-    _write(source_dir, "nameless.json", payload)
+    _write(source_dir, "nameless.json", {"raw_pairs": [_pair(0)]})
     report = ingest_directory(source_dir, db_path=db_path)
 
     assert [r.session_id for r in report.rejected] == ["nameless.json#0"]
-    assert json.loads(_record(db_path, "nameless.json#0")["raw_payload"]) == payload
+    assert _record(db_path, "nameless.json#0")["status"] == ConversationStatus.REJECTED.value
 
 
-def test_upsert_without_raw_payload_stays_compatible(db_path: Path) -> None:
-    """Existing callers (and other steps' tests) pass no raw payload."""
+def test_upsert_defaults_source_type_for_existing_callers(db_path: Path) -> None:
+    """Existing callers (and other steps' tests) pass no source_type."""
     with store.connect(db_path) as conn:
         store.upsert_conversation(conn, "s1", "f.json", ConversationStatus.ACCEPTED)
-    record = _record(db_path, "s1")
-    assert record["raw_payload"] is None
-    assert record["source_type"] == "json_export"
+    assert _record(db_path, "s1")["source_type"] == "json_export"
 
 
-def test_existing_database_gains_new_columns(tmp_path: Path) -> None:
-    """A database created before raw payloads were captured keeps working."""
+def test_existing_database_gains_source_type_column(tmp_path: Path) -> None:
+    """A database created before source_type existed keeps working."""
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.execute(
@@ -228,11 +221,9 @@ def test_existing_database_gains_new_columns(tmp_path: Path) -> None:
     store.init_db(path)
     store.init_db(path)  # and again: must be safe to repeat
 
-    old = _record(path, "old_1")
-    assert old["raw_payload"] is None
-    assert old["source_type"] == "json_export"
+    assert _record(path, "old_1")["source_type"] == "json_export"
     ingest(FakeApiSource([_api_response("new_1")]), db_path=path)
-    assert _record(path, "new_1")["raw_payload"] is not None
+    assert _record(path, "new_1")["source_type"] == "fake_api"
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +248,6 @@ def test_json_source_yields_canonical_payload(source_dir: Path) -> None:
     items = list(JsonTranscriptSource(source_dir).fetch_conversations())
     assert [i.position for i in items] == [0, 1]
     assert items[0].canonical_payload == payload
-    assert items[0].raw_payload is items[0].canonical_payload
     assert (items[0].origin, items[0].source_type, items[0].error) == ("c.json", "json_export", None)
 
 
@@ -279,10 +269,11 @@ def _ingest_one(source_dir: Path, db_path: Path, payload: dict):
 def test_same_valid_transcript_twice_is_idempotent(source_dir: Path, db_path: Path) -> None:
     payload = _conversation("s1", [_pair(0, "q0", "a0"), _pair(1, "q1", "a1")])
     _ingest_one(source_dir, db_path, payload)
-    first = (_turns(db_path), json.loads(_record(db_path, "s1")["raw_payload"]))
+    first = _turns(db_path)
     _ingest_one(source_dir, db_path, payload)
 
-    assert (_turns(db_path), json.loads(_record(db_path, "s1")["raw_payload"])) == first
+    assert _turns(db_path) == first
+    assert _record(db_path, "s1")["status"] == ConversationStatus.ACCEPTED.value
     assert _count(db_path, "conversations") == 1
     assert _count(db_path, "turns") == 2
 
@@ -293,7 +284,6 @@ def test_valid_to_changed_valid(source_dir: Path, db_path: Path) -> None:
     _ingest_one(source_dir, db_path, changed)
 
     assert _turns(db_path) == [("s1", 0, "q0", "new a0"), ("s1", 1, "new q1", "a1")]
-    assert json.loads(_record(db_path, "s1")["raw_payload"]) == changed
 
 
 def test_transcript_shrinks(source_dir: Path, db_path: Path) -> None:
@@ -318,7 +308,6 @@ def test_valid_to_invalid_removes_turns(source_dir: Path, db_path: Path) -> None
     record = _record(db_path, "s1")
     assert record["status"] == ConversationStatus.REJECTED.value
     assert "agent_said" in record["note"]
-    assert json.loads(record["raw_payload"]) == invalid
     with store.connect(db_path) as conn:
         assert store.list_sessions(conn, ConversationStatus.ACCEPTED) == []
 
@@ -332,7 +321,6 @@ def test_invalid_to_valid(source_dir: Path, db_path: Path) -> None:
 
     record = _record(db_path, "s1")
     assert (record["status"], record["note"]) == (ConversationStatus.ACCEPTED.value, "")
-    assert json.loads(record["raw_payload"]) == valid
     assert _turns(db_path, "s1") == [("s1", 0, "q0", "a0"), ("s1", 1, "q1", "a1")]
 
 
@@ -370,12 +358,6 @@ def test_fake_api_and_equivalent_json_export_produce_identical_turns(
     assert report.turn_count == 2
     assert _turns(api_db) == _turns(db_path)
     assert _turns(api_db)[0] == ("same_session", 0, "What GPA do I need?", "You need a 2.0 GPA.")
-
-
-def test_api_source_stores_provider_payload_not_canonical_copy(db_path: Path) -> None:
-    response = _api_response()
-    ingest(FakeApiSource([response]), db_path=db_path)
-    assert json.loads(_record(db_path, "abc123")["raw_payload"]) == response
 
 
 def test_api_source_uses_the_same_validation(db_path: Path) -> None:

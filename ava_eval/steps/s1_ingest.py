@@ -5,15 +5,15 @@ Everything downstream is written against the flat ``Turn`` records it produces,
 which is what makes the likely future switch to the live ElevenLabs API a matter
 of adding one source class here rather than editing five steps::
 
-    TranscriptSource ──▶ FetchedConversation (raw payload + canonical payload)
+    TranscriptSource ──▶ FetchedConversation (canonical payload)
                                    │
                           parse_export_v1 (validate + normalise)
                            ┌───────┴────────┐
                         invalid           valid
                            │                │
-          conversations: rejected,     conversations: accepted, raw payload kept
-          raw payload kept, turns      turns replaced with exactly the new ones
-          removed                           │
+          conversations: rejected,     conversations: accepted
+          turns removed                turns replaced with exactly the new ones
+                                            │
                                         Steps 3–7
 
 It also fails early and locally. A conversation missing a field is recorded as
@@ -62,16 +62,15 @@ class TranscriptFormatError(ValueError):
 class FetchedConversation:
     """One conversation as delivered by a source, before validation.
 
-    ``raw_payload`` is the provider's original object, stored untouched for
-    auditing. ``canonical_payload`` is the same data mapped into the export-v1
-    shape that ``parse_export_v1`` validates. For the JSON export they are the
-    same object; for an API they usually differ.
+    ``canonical_payload`` is the conversation mapped into the export-v1 shape
+    that ``parse_export_v1`` validates. The JSON export already has that shape;
+    an API source maps its own response into it. The provider's original
+    response is not stored.
     """
 
     origin: str  # stored as conversations.source_file: a filename, or e.g. "api:<id>"
     source_type: str  # stored as conversations.source_type
     position: int = 0  # index within ``origin``, for naming payloads with no session id
-    raw_payload: Any = None
     canonical_payload: Any = None
     error: str | None = None  # set when the input could not be read or decoded at all
 
@@ -104,7 +103,7 @@ class JsonTranscriptSource(TranscriptSource):
     """Exported JSON files: a directory of ``.json`` files, or a single file.
 
     Each file holds one conversation object or a list of them. The export format
-    already *is* the canonical shape, so the raw and canonical payloads match.
+    already *is* the canonical shape, so each object is passed through as-is.
     """
 
     name = "json_export"
@@ -130,7 +129,6 @@ class JsonTranscriptSource(TranscriptSource):
                     origin=name,
                     source_type=self.name,
                     position=position,
-                    raw_payload=payload,
                     canonical_payload=payload,
                 )
 
@@ -146,7 +144,6 @@ class JsonTranscriptSource(TranscriptSource):
 #                 yield FetchedConversation(
 #                     origin=f"api:{response.get('conversation_id')}",
 #                     source_type=self.name,
-#                     raw_payload=response,
 #                     canonical_payload=map_elevenlabs_api(response),
 #                 )
 #
@@ -277,8 +274,8 @@ def _store_conversation(
     """Validate one fetched conversation and write its latest state.
 
     Afterwards the database reflects this version only: the conversation row
-    holds its raw payload and status, and ``turns`` holds exactly its turns, or
-    none at all if it was rejected, so no later step can evaluate stale turns.
+    holds its status, and ``turns`` holds exactly its turns, or none at all if
+    it was rejected, so no later step can evaluate stale turns.
     """
     try:
         conversation = parse_export_v1(item.canonical_payload, item.origin)
@@ -291,7 +288,6 @@ def _store_conversation(
             ConversationStatus.REJECTED,
             str(exc),
             source_type=item.source_type,
-            raw_payload=item.raw_payload,
         )
         store.delete_turns(conn, session_id)
         return RejectedConversation(session_id=session_id, source_file=item.origin, reason=str(exc))
@@ -302,7 +298,6 @@ def _store_conversation(
         item.origin,
         ConversationStatus.ACCEPTED,
         source_type=item.source_type,
-        raw_payload=item.raw_payload,
     )
     store.replace_turns(conn, conversation.session_id, conversation.turns)
     return conversation
