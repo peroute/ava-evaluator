@@ -11,7 +11,7 @@ rather than hoped for.
 
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import date
 
 import pytest
 
@@ -29,13 +29,12 @@ from ava_eval.models import (
 )
 from ava_eval.steps import s6_judge
 from ava_eval.steps.s6_judge import judge_claims, render_excerpts
-from ava_eval.steps.s5_retrieve import load_index
 
 
 @pytest.fixture
-def seeded(db_path: Path) -> Path:
+def seeded(db_url: str) -> str:
     """A database with one conversation, one claim, and a small KB."""
-    with store.connect(db_path) as conn:
+    with store.connect(db_url) as conn:
         store.upsert_conversation(conn, "s1", "f.json", ConversationStatus.ACCEPTED)
         store.replace_turns(
             conn, "s1", [Turn(session_id="s1", pair_index=0, caller_asked="q", agent_said="a")]
@@ -53,7 +52,7 @@ def seeded(db_path: Path) -> Path:
                 )
             ],
         )
-        store.upsert_document(conn, "d", "d.docx", "d.docx", "h", "2026-01-01")
+        store.upsert_document(conn, "d", "d.docx", "d.docx", "h", date(2026, 1, 1))
         chunks = [
             KbChunk(chunk_id=f"k{i}", doc_id="d", section="S", ordinal=i, text=f"policy text {i}")
             for i in range(8)
@@ -63,7 +62,7 @@ def seeded(db_path: Path) -> Path:
         dim = config.settings.embed_dim
         vectors = [[1.0 if j == i else 0.1 for j in range(dim)] for i in range(8)]
         store.insert_chunks(conn, chunks, vectors, "fake")
-    return db_path
+    return db_url
 
 
 def _query() -> list[float]:
@@ -94,14 +93,13 @@ def _script(monkeypatch: pytest.MonkeyPatch, verdicts: list[Verdict]) -> list[in
     return calls
 
 
-def test_contradicted_is_never_retried(seeded: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_contradicted_is_never_retried(seeded: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Retrying a contradiction would let the judge shop for a friendlier chunk."""
     calls = _script(monkeypatch, [Verdict.CONTRADICTED])
     claim = _claim()
 
     with store.connect(seeded) as conn:
-        index = load_index(conn)
-        verdicts = judge_claims(conn, [claim], {"c0": index.search(_query(), 5)}, index=index)
+        verdicts = judge_claims(conn, [claim], {"c0": store.search_chunks(conn, _query(), 5)})
 
     assert len(calls) == 1, "the judge was called a second time for a CONTRADICTED claim"
     assert verdicts[0].verdict == Verdict.CONTRADICTED
@@ -109,24 +107,22 @@ def test_contradicted_is_never_retried(seeded: Path, monkeypatch: pytest.MonkeyP
     assert verdicts[0].attempts == 1
 
 
-def test_supported_is_never_retried(seeded: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_supported_is_never_retried(seeded: str, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _script(monkeypatch, [Verdict.SUPPORTED])
     with store.connect(seeded) as conn:
-        index = load_index(conn)
-        verdicts = judge_claims(conn, [_claim()], {"c0": index.search(_query(), 5)}, index=index)
+        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 5)})
 
     assert len(calls) == 1
     assert verdicts[0].attempts == 1
 
 
 def test_not_found_retries_and_tags_kb_gap_when_still_not_found(
-    seeded: Path, monkeypatch: pytest.MonkeyPatch
+    seeded: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Wider search found more, judged it, still nothing: the KB genuinely lacks it."""
     calls = _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.NOT_FOUND])
     with store.connect(seeded) as conn:
-        index = load_index(conn)
-        verdicts = judge_claims(conn, [_claim()], {"c0": index.search(_query(), 3)}, index=index)
+        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
 
     assert len(calls) == 2, "the NOT_FOUND claim was not retried"
     assert calls[1] > calls[0], "the retry did not widen the search"
@@ -136,13 +132,12 @@ def test_not_found_retries_and_tags_kb_gap_when_still_not_found(
 
 
 def test_not_found_that_the_retry_rescues_is_tagged_retrieval_miss(
-    seeded: Path, monkeypatch: pytest.MonkeyPatch
+    seeded: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The content was there all along; our first search missed it."""
     _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.SUPPORTED])
     with store.connect(seeded) as conn:
-        index = load_index(conn)
-        verdicts = judge_claims(conn, [_claim()], {"c0": index.search(_query(), 3)}, index=index)
+        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
 
     assert verdicts[0].verdict == Verdict.SUPPORTED
     assert verdicts[0].tag == VerdictTag.RETRIEVAL_MISS
@@ -150,30 +145,28 @@ def test_not_found_that_the_retry_rescues_is_tagged_retrieval_miss(
 
 
 def test_a_contradiction_found_on_retry_still_counts_as_a_retrieval_miss(
-    seeded: Path, monkeypatch: pytest.MonkeyPatch
+    seeded: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The tag describes our retrieval, the verdict describes Ava. Both are kept."""
     _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.CONTRADICTED])
     with store.connect(seeded) as conn:
-        index = load_index(conn)
-        verdicts = judge_claims(conn, [_claim()], {"c0": index.search(_query(), 3)}, index=index)
+        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
 
     assert verdicts[0].verdict == Verdict.CONTRADICTED
     assert verdicts[0].tag == VerdictTag.RETRIEVAL_MISS
 
 
-def test_retry_is_recorded_as_attempt_two(seeded: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_is_recorded_as_attempt_two(seeded: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """The retrieval history has to be auditable per attempt."""
     _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.NOT_FOUND])
     with store.connect(seeded) as conn:
-        index = load_index(conn)
-        judge_claims(conn, [_claim()], {"c0": index.search(_query(), 3)}, index=index)
+        judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
 
     with store.connect(seeded) as conn:
         assert store.get_retrievals(conn, "c0", attempt=2)
 
 
-def test_no_claims_is_not_an_error(seeded: Path) -> None:
+def test_no_claims_is_not_an_error(seeded: str) -> None:
     with store.connect(seeded) as conn:
         assert judge_claims(conn, [], {}) == []
 
@@ -181,25 +174,24 @@ def test_no_claims_is_not_an_error(seeded: Path) -> None:
 # --- rendering and prompts ------------------------------------------------
 
 
-def test_excerpts_carry_chunk_ids(seeded: Path) -> None:
+def test_excerpts_carry_chunk_ids(seeded: str) -> None:
     """Without the id, a flag is an assertion with no way to check it."""
     with store.connect(seeded) as conn:
-        chunks = load_index(conn).search(_query(), 2)
+        chunks = store.search_chunks(conn, _query(), 2)
     rendered = render_excerpts(chunks)
     assert all(c.chunk_id in rendered for c in chunks)
 
 
-def test_dimension_mismatch_explains_itself(seeded: Path) -> None:
+def test_dimension_mismatch_explains_itself(seeded: str) -> None:
     """Swapping embedding model or dimension without re-indexing must say so.
 
-    The raw numpy failure here is a matmul shape error naming neither the cause
-    nor the fix, and this is a mistake that happens the first time anyone moves
-    from the fake embedder to a real one.
+    pgvector's own failure here is "different vector dimensions", naming neither
+    the cause nor the fix, and this is a mistake that happens the first time
+    anyone moves from the fake embedder to a real one.
     """
-    with store.connect(seeded) as conn:
-        index = load_index(conn)
     with pytest.raises(RuntimeError, match="index-kb --force"):
-        index.search([1.0, 1.0], 2)
+        with store.connect(seeded) as conn:
+            store.search_chunks(conn, [1.0, 1.0], 2)
 
 
 def test_excerpts_handle_the_empty_case() -> None:

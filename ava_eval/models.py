@@ -53,8 +53,9 @@ class ConversationStatus(str, Enum):
     REJECTED = "rejected"
 
 
-# Severity ordering used for the turn-level rollup.  Mirrored in SQL in
-# db/schema.sql -- if you change one, change the other.
+# Severity ordering used for the turn-level rollup.  Mirrored in SQL in the
+# v_turn_severity view (db/migrations) -- if you change one, change the other,
+# and change the view through a new migration.
 SEVERITY: dict[Verdict, int] = {
     Verdict.CONTRADICTED: 3,
     Verdict.NOT_FOUND: 2,

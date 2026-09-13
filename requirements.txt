@@ -1,4 +1,4 @@
-# Runtime
+# Runtime -- everything the Docker image needs, nothing it doesn't.
 google-genai>=1.0.0
 pydantic>=2.7
 python-docx>=1.1.0
@@ -7,6 +7,7 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 python-dotenv>=1.0
 
-# Dev
-pytest>=8.0
-black>=24.0
+# Storage
+psycopg[binary]>=3.2   # PostgreSQL driver; [binary] bundles libpq, so no compiler needed
+pgvector>=0.3          # lets psycopg send and receive numpy arrays as the vector type
+alembic>=1.13          # schema migrations (brings SQLAlchemy, used only to run them)

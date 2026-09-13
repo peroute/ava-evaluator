@@ -56,7 +56,8 @@ class Settings:
     judge_model: str
     embed_model: str
     embed_dim: int
-    db_path: Path
+    database_url: str
+    test_database_url: str
     stub_llm: bool
     stub_embed: bool
     top_k: int
@@ -64,21 +65,26 @@ class Settings:
     max_workers: int
     chunk_target_chars: int
     chunk_overlap_ratio: float
+    display_timezone: str
 
     @classmethod
     def from_env(cls) -> "Settings":
         """Build settings from environment variables (and .env, already loaded)."""
-        raw_db = os.getenv("AVA_DB_PATH", "data/ava_eval.db")
-        db_path = Path(raw_db)
-        if not db_path.is_absolute():
-            db_path = PROJECT_ROOT / db_path
-
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
             judge_model=os.getenv("AVA_JUDGE_MODEL", "gemini-3.8-flash"),
             embed_model=os.getenv("AVA_EMBED_MODEL", "gemini-embedding-2"),
             embed_dim=_env_int("AVA_EMBED_DIM", 768),
-            db_path=db_path,
+            # Defaults match docker-compose.yml, so a fresh clone works against
+            # `docker compose up -d db` with no .env at all. Inside compose the
+            # host is `db`, and compose overrides this variable for that reason.
+            # 127.0.0.1, not localhost: compose publishes the database on IPv4
+            # loopback only, and `localhost` tries IPv6 (::1) first -- which
+            # stalls until that attempt times out before falling back.
+            database_url=os.getenv("DATABASE_URL", "postgresql://ava:ava@127.0.0.1:5433/ava_eval"),
+            test_database_url=os.getenv(
+                "AVA_TEST_DATABASE_URL", "postgresql://ava:ava@127.0.0.1:5433/ava_eval_test"
+            ),
             stub_llm=_env_bool("AVA_STUB_LLM", True),
             stub_embed=_env_bool("AVA_STUB_EMBED", True),
             top_k=_env_int("AVA_TOP_K", 5),
@@ -86,6 +92,10 @@ class Settings:
             max_workers=_env_int("AVA_MAX_WORKERS", 4),
             chunk_target_chars=_env_int("AVA_CHUNK_TARGET_CHARS", 1200),
             chunk_overlap_ratio=_env_float("AVA_CHUNK_OVERLAP_RATIO", 0.15),
+            # The zone timestamps are *shown* in. Storage is unaffected: TIMESTAMPTZ
+            # holds an absolute instant. An IANA name, not a fixed offset, so
+            # daylight saving time is handled (Lubbock is -05:00 CDT, -06:00 CST).
+            display_timezone=os.getenv("AVA_DISPLAY_TIMEZONE") or "America/Chicago",
         )
 
 
