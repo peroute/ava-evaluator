@@ -15,15 +15,12 @@
 
 -- === Step 1: ingest ========================================================
 
--- Databases created before source_type existed get it from store.init_db, since
--- CREATE TABLE IF NOT EXISTS cannot add columns.
 CREATE TABLE IF NOT EXISTS conversations (
     session_id   TEXT PRIMARY KEY,
     source_file  TEXT NOT NULL,
     status       TEXT NOT NULL,          -- accepted | rejected
     note         TEXT NOT NULL DEFAULT '',
-    ingested_at  TEXT NOT NULL,
-    source_type  TEXT NOT NULL DEFAULT 'json_export'    -- which TranscriptSource produced it
+    ingested_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS turns (
