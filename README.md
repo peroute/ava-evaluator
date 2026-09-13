@@ -189,6 +189,12 @@ versions `DATE`, `contains_claims` `BOOLEAN`, `scope_derived_from` `JSONB`.
 `CHECK` constraints mirror the enums in `models.py`, so a typo'd verdict is
 rejected by the database instead of showing up in a report.
 
+**Time zone.** Timestamps are `TIMESTAMPTZ`: an absolute instant, written in UTC
+by `store.utcnow()`. They are *displayed* in Lubbock time (`America/Chicago`,
+so -05:00 in summer and -06:00 in winter). App connections take the zone from
+`AVA_DISPLAY_TIMEZONE`; migration `0002` makes it the database default, so
+pgAdmin and psql match (reconnect after migrating).
+
 **Transactions.** A failed statement in PostgreSQL aborts the rest of its
 transaction. `evaluate` wraps each conversation in a savepoint
 (`store.atomic`), so one bad conversation does not take down the batch.

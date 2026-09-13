@@ -100,6 +100,19 @@ def connect(database_url: str | None = None) -> Iterator[Connection]:
             f"Run 'python -m ava_eval migrate' first."
         ) from exc
 
+    # Only changes how timestamps are displayed and returned (psycopg hands back
+    # datetimes in the session zone); the stored instants are untouched. Set here
+    # as well as by migration 0002 so the app never depends on the database
+    # default. set_config rather than SET, because SET cannot take a parameter.
+    try:
+        conn.execute("SELECT set_config('TimeZone', %s, false)", (settings.display_timezone,))
+    except psycopg.errors.InvalidParameterValue as exc:
+        conn.close()
+        raise RuntimeError(
+            f"AVA_DISPLAY_TIMEZONE={settings.display_timezone!r} is not a time zone "
+            f"PostgreSQL recognises. Use an IANA name such as 'America/Chicago'."
+        ) from exc
+
     try:
         yield conn
         conn.commit()

@@ -65,6 +65,7 @@ class Settings:
     max_workers: int
     chunk_target_chars: int
     chunk_overlap_ratio: float
+    display_timezone: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -88,6 +89,10 @@ class Settings:
             max_workers=_env_int("AVA_MAX_WORKERS", 4),
             chunk_target_chars=_env_int("AVA_CHUNK_TARGET_CHARS", 1200),
             chunk_overlap_ratio=_env_float("AVA_CHUNK_OVERLAP_RATIO", 0.15),
+            # The zone timestamps are *shown* in. Storage is unaffected: TIMESTAMPTZ
+            # holds an absolute instant. An IANA name, not a fixed offset, so
+            # daylight saving time is handled (Lubbock is -05:00 CDT, -06:00 CST).
+            display_timezone=os.getenv("AVA_DISPLAY_TIMEZONE") or "America/Chicago",
         )
 
 
