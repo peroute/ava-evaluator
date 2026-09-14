@@ -24,6 +24,14 @@ x-app: &app
     DATABASE_URL: postgresql://${POSTGRES_USER:-ava}:${POSTGRES_PASSWORD:-ava}@db:5432/${POSTGRES_DB:-ava_eval}
 
 services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      - api
+
   db:
     image: pgvector/pgvector:pg17
     environment:

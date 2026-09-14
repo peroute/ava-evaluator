@@ -51,8 +51,11 @@ Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) runni
 
 ```powershell
 copy .env.example .env         # works offline as-is; add a key when going live
-docker compose up --build      # Postgres + migrations + API on http://127.0.0.1:8000
+docker compose up --build      # Postgres + API + frontend
 ```
+
+Open the evaluation frontend at `http://127.0.0.1:8080`. The API remains
+available directly at `http://127.0.0.1:8000` (interactive docs at `/docs`).
 
 In a second terminal, run the pipeline inside the same image:
 
