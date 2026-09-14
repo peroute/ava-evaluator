@@ -253,3 +253,59 @@ def test_database_rejects_an_unknown_verdict(db_url: str) -> None:
             store.upsert_conversation(conn, "s1", "f.json", ConversationStatus.ACCEPTED)
             _seed_turn(conn, "s1", 0, [("c0", Verdict.SUPPORTED)])
             conn.execute("UPDATE verdicts SET verdict = 'MAYBE' WHERE claim_id = 'c0'")
+
+
+# --- unjudged claims (migration 0004) --------------------------------------
+
+
+def _seed_mixed_turn(conn: store.Connection, judged: list[Verdict], unjudged: int) -> None:
+    """One turn with ``judged`` verdicts plus ``unjudged`` claims that have none."""
+    store.upsert_conversation(conn, "s1", "f.json", ConversationStatus.ACCEPTED)
+    store.replace_turns(
+        conn, "s1", [Turn(session_id="s1", pair_index=0, caller_asked="q", agent_said="a")]
+    )
+    ids = [f"c{i}" for i in range(len(judged) + unjudged)]
+    store.replace_claims_for_session(
+        conn,
+        "s1",
+        [
+            Claim(claim_id=cid, session_id="s1", pair_index=0, subject_tag="S", text="t")
+            for cid in ids
+        ],
+    )
+    for claim_id, verdict in zip(ids, judged):
+        store.save_verdict(conn, ClaimVerdict(claim_id=claim_id, verdict=verdict))
+
+
+def test_turn_whose_claims_all_failed_is_unjudged_not_no_claims(db_url: str) -> None:
+    """Before 0004 this turn read NO_CLAIMS, which claimed there was nothing to check."""
+    with store.connect(db_url) as conn:
+        _seed_mixed_turn(conn, judged=[], unjudged=1)
+        row = store.turn_results(conn, "s1")[0]
+
+    assert row["turn_verdict"] == "UNJUDGED"
+    assert row["unjudged_count"] == 1
+    assert row["claim_count"] == 1
+
+
+def test_partly_judged_turn_shows_its_worst_verdict_and_the_gap(db_url: str) -> None:
+    with store.connect(db_url) as conn:
+        _seed_mixed_turn(conn, judged=[Verdict.SUPPORTED], unjudged=1)
+        row = store.turn_results(conn, "s1")[0]
+
+    assert row["turn_verdict"] == "SUPPORTED"
+    assert row["unjudged_count"] == 1
+    assert row["claim_count"] == 2
+
+
+def test_unjudged_claims_are_counted_in_summary_stats_and_filter(db_url: str) -> None:
+    with store.connect(db_url) as conn:
+        _seed_mixed_turn(conn, judged=[Verdict.CONTRADICTED], unjudged=2)
+        summary = store.conversation_summary(conn, "s1")[0]
+        stats = store.verdict_stats(conn)
+        unjudged = store.claim_results(conn, unjudged=True)
+
+    assert summary["unjudged_turns"] == 1
+    assert summary["contradicted_turns"] == 1
+    assert stats["totals"]["unjudged"] == 2
+    assert sorted(r["claim_id"] for r in unjudged) == ["c1", "c2"]

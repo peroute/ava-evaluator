@@ -34,6 +34,8 @@ class SessionResult:
     contradicted: int = 0
     not_found: int = 0
     error: str | None = None
+    # Claims step 6 could not judge (claim id -> error). The rest were still saved.
+    failed_claims: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -51,6 +53,11 @@ class EvaluationReport:
     def failures(self) -> list[SessionResult]:
         """Conversations that errored out."""
         return [s for s in self.sessions if s.error]
+
+    @property
+    def claim_failures(self) -> list[SessionResult]:
+        """Conversations that finished but left some claims unjudged."""
+        return [s for s in self.sessions if s.failed_claims]
 
 
 def evaluate(
@@ -117,17 +124,18 @@ def evaluate(
                     # Step 5 -- per-claim retrieval, parallel across claims.
                     retrievals = retrieve_for_claims(conn, claims)
 
-                    # Step 6 -- verdicts, with the NOT_FOUND-only retry.
-                    verdicts = judge_claims(conn, claims, retrievals)
+                    # Step 6 -- verdicts, with the NOT_FOUND-only retry. A claim
+                    # that fails is skipped, not raised, so the paid work above
+                    # is kept for every other claim.
+                    batch = judge_claims(conn, claims, retrievals)
+                    verdicts = batch.verdicts
+                    result.failed_claims = batch.failures
                     result.supported = sum(1 for v in verdicts if v.verdict == Verdict.SUPPORTED)
                     result.contradicted = sum(
                         1 for v in verdicts if v.verdict == Verdict.CONTRADICTED
                     )
                     result.not_found = sum(1 for v in verdicts if v.verdict == Verdict.NOT_FOUND)
 
-            except NotImplementedError as exc:
-                # A deliberate stub, not a bug. Surface it plainly.
-                result.error = str(exc)
             except Exception as exc:
                 # One bad conversation should not end the batch, for the same
                 # reason a malformed transcript does not stop ingest.

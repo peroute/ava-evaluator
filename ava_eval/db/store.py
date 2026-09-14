@@ -634,10 +634,16 @@ def claim_results(
     subject_tag: str | None = None,
     limit: int = 200,
     offset: int = 0,
+    unjudged: bool = False,
 ) -> list[dict[str, Any]]:
-    """Filterable claim-level results -- what the frontend actually queries."""
+    """Filterable claim-level results -- what the frontend actually queries.
+
+    ``unjudged=True`` returns only claims step 6 could not judge (no verdict row).
+    """
     query = "SELECT * FROM v_claim_results WHERE TRUE"
     params: list[Any] = []
+    if unjudged:
+        query += " AND verdict IS NULL"
     if session_id:
         query += " AND session_id = %s"
         params.append(session_id)
@@ -680,7 +686,10 @@ def verdict_stats(conn: Connection) -> dict[str, Any]:
             (SELECT COUNT(*) FROM conversations WHERE status = 'accepted') AS conversations,
             (SELECT COUNT(*) FROM turns)      AS turns,
             (SELECT COUNT(*) FROM claims)     AS claims,
-            (SELECT COUNT(*) FROM kb_chunks)  AS kb_chunks
+            (SELECT COUNT(*) FROM kb_chunks)  AS kb_chunks,
+            (SELECT COUNT(*) FROM claims cl
+              WHERE NOT EXISTS (SELECT 1 FROM verdicts v WHERE v.claim_id = cl.claim_id)
+            ) AS unjudged
         """).fetchone()
     return {
         "totals": totals,

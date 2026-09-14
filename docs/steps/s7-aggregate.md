@@ -17,7 +17,7 @@ recompute from the underlying rows every time you read them. This module only re
 | | |
 |---|---|
 | **Reads** | `v_claim_results`, `v_turn_results`, `v_conversation_summary`, plus counts from `verdicts` |
-| **Produces** | a report dict (`stats`, `conversations`, `turns`, `flagged_claims`) → plain text, or JSON from the API |
+| **Produces** | a report dict (`stats`, `conversations`, `turns`, `flagged_claims`, `unjudged_claims`) → plain text, or JSON from the API |
 | **Writes** | nothing |
 
 ## How the code works
@@ -27,25 +27,30 @@ recompute from the underlying rows every time you read them. This module only re
 | View | Level | What it adds |
 |---|---|---|
 | [`v_claim_results`](../../ava_eval/db/migrations/versions/0003_kb_structure.py) | claim | claim + verdict + **evidence chunk text, section, source doc, version date, chunk kind**, and `kb_changed_since_judged` (LEFT JOINs, so unjudged claims still appear). Redefined in migration 0003 |
-| [`v_turn_severity`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L182) | helper | per turn: counts of each verdict and `MAX(severity)` where CONTRADICTED=3, NOT_FOUND=2, SUPPORTED=1 |
-| [`v_turn_results`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L203) | turn | **the worst verdict wins**. Turns without verdicts are labelled, never dropped (see below) |
-| [`v_conversation_summary`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L230) | conversation | counts of contradicted / not_found / supported / skipped turns, and includes rejected conversations |
+| [`v_turn_severity`](../../ava_eval/db/migrations/versions/0004_unjudged_claims.py) | helper | per turn: counts of each verdict, `unjudged_count` (claims with no verdict), and `MAX(severity)` where CONTRADICTED=3, NOT_FOUND=2, SUPPORTED=1. `LEFT JOIN`s verdicts since migration 0004, so `claim_count` counts every claim |
+| [`v_turn_results`](../../ava_eval/db/migrations/versions/0004_unjudged_claims.py) | turn | **the worst verdict wins**, plus `unjudged_count`. Turns without verdicts are labelled, never dropped (see below) |
+| [`v_conversation_summary`](../../ava_eval/db/migrations/versions/0004_unjudged_claims.py) | conversation | counts of contradicted / not_found / supported / skipped / **unjudged** turns, and includes rejected conversations |
 
-`turn_verdict` labels for turns that have no verdicts:
+The three rollup views were created in 0001 and redefined in migration 0004.
+
+`turn_verdict` labels for turns that have no verdicts, in the order they're checked:
 
 | Label | Meaning |
 |---|---|
+| `UNJUDGED` | the turn has claims, but step 6 failed on all of them. Re-run `evaluate`. (A turn with *some* verdicts shows its worst verdict and `unjudged_count > 0`) |
 | `NOT_EVALUATED` | step 3 said it's filler |
 | `NO_CLAIMS` | step 3 flagged it, but step 4 found nothing to check |
 | `UNCLASSIFIED` | `evaluate` hasn't run on it yet |
 
 ### The Python
 
-- [`conversation_report`](../../ava_eval/steps/s7_aggregate.py#L36) collects [`verdict_stats`](../../ava_eval/db/store.py#L646),
-  [`conversation_summary`](../../ava_eval/db/store.py#L592), [`turn_results`](../../ava_eval/db/store.py#L602), and
-  flagged claims via [`claim_results`](../../ava_eval/db/store.py#L612) (CONTRADICTED first, then NOT_FOUND, up to 500 each).
-- [`format_report`](../../ava_eval/steps/s7_aggregate.py#L61) prints the text report. [`_bar`](../../ava_eval/steps/s7_aggregate.py#L50)
-  draws the verdict mix as `#` (contradicted) `~` (not found) `.` (supported).
+- [`conversation_report`](../../ava_eval/steps/s7_aggregate.py#L37) collects [`verdict_stats`](../../ava_eval/db/store.py#L669)
+  (its `totals` include `unjudged`), [`conversation_summary`](../../ava_eval/db/store.py#L609), [`turn_results`](../../ava_eval/db/store.py#L619),
+  flagged claims via [`claim_results`](../../ava_eval/db/store.py#L629) (CONTRADICTED first, then NOT_FOUND, up to 500 each),
+  and unjudged claims via `claim_results(unjudged=True)`.
+- [`format_report`](../../ava_eval/steps/s7_aggregate.py#L67) prints the text report: a `[!] N claims are UNJUDGED` header
+  line when there are any, an `unjudged N` column per conversation, and an "Unjudged claims" section before the flagged
+  ones. [`_bar`](../../ava_eval/steps/s7_aggregate.py#L56) draws the verdict mix as `#` (contradicted) `~` (not found) `.` (supported).
 
 ### The API (read-only)
 
@@ -55,7 +60,7 @@ recompute from the underlying rows every time you read them. This module only re
 | `GET /stats` | totals, counts by verdict and by tag |
 | `GET /conversations` | `v_conversation_summary` |
 | `GET /conversations/{id}` | summary + turns + claims for one conversation |
-| `GET /claims?verdict=&tag=&subject=&session=&limit=&offset=` | filterable `v_claim_results`, which is what a frontend mostly uses |
+| `GET /claims?verdict=&tag=&subject=&session=&unjudged=&limit=&offset=` | filterable `v_claim_results`, which is what a frontend mostly uses. `unjudged=true` returns only claims with no verdict |
 | `GET /claims/{id}` | one claim + its attempt 1 and attempt 2 retrievals |
 
 Interactive docs at `http://127.0.0.1:8000/docs`.
@@ -88,7 +93,9 @@ Interactive docs at `http://127.0.0.1:8000/docs`.
 
 [`tests/test_retrieve_and_rollup.py`](../../tests/test_retrieve_and_rollup.py): turn verdict is the worst of its claims,
 turns with no claims are labelled not dropped, conversation summary counts each severity separately, **re-judging a
-claim updates the rollup**, tags are counted, the database rejects an unknown verdict.
+claim updates the rollup**, tags are counted, the database rejects an unknown verdict, and (migration 0004) a turn whose
+claims all failed reads `UNJUDGED` not `NO_CLAIMS`, a partly judged turn keeps its worst verdict and reports the gap,
+and unjudged claims are counted in the summary, the stats and the `unjudged` filter.
 
 ## Connects to
 

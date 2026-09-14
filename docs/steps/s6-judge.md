@@ -24,12 +24,12 @@ missed it".
 |---|---|
 | **Reads** | `Claim`s + step 5's results dict |
 | **LLM returns** | [`JudgeResponse`](../../ava_eval/models.py#L223): `verdict`, `rationale`, `evidence_chunk_id` |
-| **Produces** | [`ClaimVerdict`](../../ava_eval/models.py#L245): adds `tag` (`kb_gap` / `retrieval_miss` / none) and `attempts` |
-| **Writes** | `verdicts` via [`store.save_verdict`](../../ava_eval/db/store.py#L560), plus `claim_retrievals` rows with `attempt=2` for retried claims |
+| **Produces** | `JudgeBatch`: `verdicts` (list of [`ClaimVerdict`](../../ava_eval/models.py#L306), which adds `tag` (`kb_gap` / `retrieval_miss` / none) and `attempts`) and `failures` (claim id → error, for claims that got no verdict) |
+| **Writes** | `verdicts` via [`store.save_verdict`](../../ava_eval/db/store.py#L574), plus `claim_retrievals` rows with `attempt=2` for retried claims |
 
 ## How the code works
 
-[`judge_claims(conn, claims, retrievals)`](../../ava_eval/steps/s6_judge.py#L220):
+[`judge_claims(conn, claims, retrievals)`](../../ava_eval/steps/s6_judge.py#L278):
 
 ```mermaid
 flowchart TD
@@ -47,9 +47,20 @@ flowchart TD
    `k = AVA_TOP_K × AVA_RETRY_K_MULTIPLIER` and `attempt=2`.
 4. Each one is judged again on the whole widened set (one claim after another), unconditionally. Still `NOT_FOUND` →
    `kb_gap`. Anything else → the evidence was there all along → `retrieval_miss`.
-5. Save every verdict.
+5. Save every verdict, and return the failures.
 
-[`render_excerpts`](../../ava_eval/steps/s6_judge.py#L78) formats the chunks for the prompt. Each carries its
+**When a claim can't be judged.** Every judge call is wrapped in `try/except LlmError` (only `LlmError`, so a real bug
+still crashes):
+
+| Where it failed | What happens |
+|---|---|
+| First pass | The claim goes into `failures` and gets **no verdict row**. The other claims are still saved. The report shows it as `UNJUDGED`, and `evaluate` prints it and exits 1 |
+| Wider search (embedding) for the retry | Every retry claim keeps its first-pass `NOT_FOUND`, `attempts=1`, no tag, rationale ends `[retry failed: ...]` |
+| Retry judge call | Same fallback, for that claim only |
+
+The fallback is untagged on purpose: `kb_gap` vs `retrieval_miss` is decided *by* the retry, and it never ran.
+
+[`render_excerpts`](../../ava_eval/steps/s6_judge.py#L80) formats the chunks for the prompt. Each carries its
 `chunk_id` (the judge has to name the chunk it used), its `source` (the chunk's `Group > Topic > Label` header, which
 is how the judge knows which program an excerpt belongs to), and its similarity score.
 
@@ -60,7 +71,9 @@ a verdict was judged against an older version of the knowledge base.
 
 | `AVA_STUB_LLM=1` (default) | `AVA_STUB_LLM=0` |
 |---|---|
-| [`_judge_stub`](../../ava_eval/steps/s6_judge.py#L104): finds the chunk sharing the most content words with the claim. Under 35% overlap → `NOT_FOUND`. Enough overlap but **no number in common** → `CONTRADICTED`. Otherwise `SUPPORTED`. | [`_judge_live`](../../ava_eval/steps/s6_judge.py#L164) — **not implemented yet**. `load_prompt("judge_claim", subject_tag=..., claim_text=..., excerpts=render_excerpts(chunks))` → `generate_structured(prompt, JudgeResponse)` |
+| [`_judge_stub`](../../ava_eval/steps/s6_judge.py#L110): finds the chunk sharing the most content words with the claim. Under 35% overlap → `NOT_FOUND`. Enough overlap but **no number in common** → `CONTRADICTED`. Otherwise `SUPPORTED`. | [`_judge_live`](../../ava_eval/steps/s6_judge.py#L199): `load_prompt("judge_claim", subject_tag=..., claim_text=..., excerpts=render_excerpts(chunks))` → `generate_structured(prompt, JudgeResponse)` → [`_check_evidence`](../../ava_eval/steps/s6_judge.py#L170) |
+
+`AVA_STUB_LLM` is one switch for steps 3, 4 and 6 together.
 
 The stub is crude, but it can produce all three verdicts, so the retry path and the rollup get exercised offline.
 **The retry logic and tagging are real in both modes.**
@@ -82,8 +95,13 @@ The stub is crude, but it can produce all three verdicts, so the retry path and 
 
 ## Gotchas
 
-- **Check `evidence_chunk_id` in the live version.** If the model invents an id, the join in `v_claim_results` finds
-  nothing and the flag silently loses its evidence. Check the id is one of the chunks you passed in.
+- **The evidence id is checked, and a bad one fails the claim.** If the model invents an id, the join in
+  `v_claim_results` would find nothing and the flag would silently lose its evidence. So `_check_evidence` raises
+  `LlmError` when the id isn't one of the chunks shown, or when a `SUPPORTED`/`CONTRADICTED` has no id at all. No
+  re-ask: the claim becomes `UNJUDGED`. `NOT_FOUND` may cite nothing.
+- **Bad JSON isn't retried.** `generate_structured` retries failed *calls*, not replies that don't match the schema, so
+  those claims also end up `UNJUDGED`.
+- **The retry pass runs one claim at a time**, unlike the threaded first pass. Slower with many `NOT_FOUND`s, gentler on quota.
 - A `CONTRADICTED` found **on the retry** is tagged `retrieval_miss`. The tag says the *first search* missed; the
   verdict still says what the evidence shows.
 - `tag` is only ever set on the retry path. A first-pass `SUPPORTED`/`CONTRADICTED` has `tag = NULL`.
@@ -93,10 +111,13 @@ The stub is crude, but it can produce all three verdicts, so the retry path and 
 [`tests/test_judge_policy.py`](../../tests/test_judge_policy.py) scripts the judge's answers and checks:
 `CONTRADICTED` and `SUPPORTED` never retry, `NOT_FOUND` → `kb_gap` when it's still not found, a rescue → `retrieval_miss`
 (including a contradiction found on retry), the retry is saved as attempt 2, excerpts carry chunk ids, and prompt
-loading (unknown field, unfilled placeholder, missing template).
+loading (unknown field, unfilled placeholder, missing template). The live judge runs against a fake model: the prompt
+carries the claim and every chunk id, a made-up or missing evidence id fails the claim and saves nothing, one failed
+claim doesn't lose the others, and a failed retry (judge call or wider search) keeps the first-pass `NOT_FOUND`.
 
 ## Connects to
 
 - **Previous:** [Step 5](s5-retrieve.md) supplied first-attempt chunks, and is called again for the retry.
 - **Next:** [Step 7](s7-aggregate.md) reads `verdicts` through SQL views. Nothing is copied or summarised here.
-- **Pipeline:** the counts in [`pipeline.py:122`](../../ava_eval/pipeline.py#L122) feed the `evaluate` command's per-session line.
+- **Pipeline:** the counts and `failures` from `judge_claims` feed the `evaluate` command's per-session line
+  ([`pipeline.py`](../../ava_eval/pipeline.py)), including `failed N`.

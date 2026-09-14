@@ -167,11 +167,12 @@ A fresh clone runs end to end with **no API key and no network calls**. Two swit
 |---|---|
 | Steps 1, 2, 5, 7, the retry policy, the database, the API | **Real** |
 | Live embeddings (`embed_texts` with `AVA_STUB_EMBED=0`) | **Implemented** |
-| `_classify_live` ([s3](steps/s3-classify.md)), `_decompose_live` ([s4](steps/s4-decompose.md)), `_judge_live` ([s6](steps/s6-judge.md)) | **Left to implement.** Prompt written, output schema defined, notes in each docstring |
+| `_classify_live` ([s3](steps/s3-classify.md)), `_decompose_live` ([s4](steps/s4-decompose.md)), `_judge_live` ([s6](steps/s6-judge.md)) | **Implemented.** One switch, `AVA_STUB_LLM=0`, turns all three on together |
 
-Each one is roughly: `load_prompt(...)` → `generate_structured(prompt, Schema)` → return. `generate_structured` already
-handles retries, temperature 0, and schema validation. To go live: set `GEMINI_API_KEY`, flip `AVA_STUB_LLM=0`, and
-implement them one at a time, re-running `evaluate` after each. The prompts in
+Each one is: `load_prompt(...)` → `generate_structured(prompt, Schema)` → validate. `generate_structured` handles
+retries, temperature 0, and schema validation; the judge also rejects an evidence id it was not shown. To go live: set
+`GEMINI_API_KEY`, flip `AVA_STUB_LLM=0`, and follow [Going live](operations.md#going-live). A claim the judge fails on
+is saved as `UNJUDGED` rather than failing the conversation. The prompts in
 [`ava_eval/llm/prompts/`](../ava_eval/llm/prompts/) are real design work, not boilerplate. Read them before changing them.
 
 ---

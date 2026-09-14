@@ -23,8 +23,9 @@ Business, the minimum GPA is 2.5". It's the hardest step, and everything after i
 
 ## How the code works
 
-1. [`pipeline.evaluate`](../../ava_eval/pipeline.py#L108) calls [`decompose_conversation`](../../ava_eval/steps/s4_decompose.py#L127), which switches between stub and live.
-2. **Live** (to be written): render the transcript, fill the prompt, call `generate_structured(prompt, ConversationClaims)`.
+1. [`pipeline.evaluate`](../../ava_eval/pipeline.py#L115) calls [`decompose_conversation`](../../ava_eval/steps/s4_decompose.py#L122), which switches between stub and live.
+2. **Live** ([`_decompose_live`](../../ava_eval/steps/s4_decompose.py#L90)): if no turn was flagged, return no claims without
+   calling the model. Otherwise render the transcript, fill the prompt, call `generate_structured(prompt, ConversationClaims)`.
    [`render_transcript`](../../ava_eval/steps/s4_decompose.py#L34) prints **every** turn, including unflagged ones, in the
    exact format the prompt's worked example uses:
    ```
@@ -32,7 +33,7 @@ Business, the minimum GPA is 2.5". It's the hardest step, and everything after i
               agent:  Great choice. The Online Bachelor of Business Administration ...
               contains_claims: true
    ```
-3. [`to_claims`](../../ava_eval/steps/s4_decompose.py#L136) flattens the response into `Claim` rows:
+3. [`to_claims`](../../ava_eval/steps/s4_decompose.py#L131) flattens the response into `Claim` rows:
    - drops any turn whose `pair_index` isn't in this conversation (the model can invent one)
    - drops empty claim text
    - filters `scope_derived_from` to indexes that actually exist
@@ -44,7 +45,7 @@ Business, the minimum GPA is 2.5". It's the hardest step, and everything after i
 
 | `AVA_STUB_LLM=1` (default) | `AVA_STUB_LLM=0` |
 |---|---|
-| [`_decompose_stub`](../../ava_eval/steps/s4_decompose.py#L59): one claim per sentence of 4+ words that isn't a question. **No scope resolution:** the text is copied as-is, and `subject_tag` is always `[stub] unresolved subject`. | [`_decompose_live`](../../ava_eval/steps/s4_decompose.py#L90) — **not implemented yet**. |
+| [`_decompose_stub`](../../ava_eval/steps/s4_decompose.py#L59): one claim per sentence of 4+ words that isn't a question. **No scope resolution:** the text is copied as-is, and `subject_tag` is always `[stub] unresolved subject`. | [`_decompose_live`](../../ava_eval/steps/s4_decompose.py#L90): one Gemini call per conversation with the whole rendered transcript. The model resolves each claim's scope and returns a `subject_tag` per turn and `scope_derived_from_pair_index` per claim. Skips the call when nothing was flagged. |
 
 What the stub skips (resolving scope) is the whole reason this step needs a language model.
 
@@ -69,7 +70,7 @@ What the stub skips (resolving scope) is the whole reason this step needs a lang
   read the format.
 - A flagged turn that comes back with `claims: []` is normal (step 3 over-includes on purpose). It shows as
   `NO_CLAIMS` in step 7.
-- Conversations are processed **one after another** ([`pipeline.py:86`](../../ava_eval/pipeline.py#L86)), so an error
+- Conversations are processed **one after another** ([`pipeline.py:93`](../../ava_eval/pipeline.py#L93)), so an error
   always points to one specific conversation.
 
 ## Tests
@@ -81,5 +82,5 @@ No dedicated test for `to_claims` or the stub yet.
 
 - **Previous:** [Step 3](s3-classify.md) decides which turns get claims.
 - **Next:** [Step 5](s5-retrieve.md) embeds each `Claim.text` as a search query. If there are no claims, the
-  pipeline skips 5–6 for that conversation ([`pipeline.py:113`](../../ava_eval/pipeline.py#L113)).
+  pipeline skips 5–6 for that conversation ([`pipeline.py:120`](../../ava_eval/pipeline.py#L120)).
 - **Step 7 / API:** `subject_tag` is a filter on `GET /claims?subject=...`, and the planned Phase 2 groups results by it.
