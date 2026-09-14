@@ -189,11 +189,11 @@ belongs to. → [Step 6 details](steps/s6-judge.md)
 
 `v_conversation_summary`: rejected conversations are listed too:
 
-| session | status | turns | contradicted | not_found | supported | skipped |
-|---|---|---|---|---|---|---|
-| conv_demo_001 | accepted | 5 | 1 | 1 | 2 | 1 |
-| conv_demo_002 | accepted | 3 | 0 | 0 | 2 | 1 |
-| conv_demo_003 | rejected: `'agent_said' is empty` | 0 | 0 | 0 | 0 | 0 |
+| session | status | turns | contradicted | not_found | supported | skipped | unjudged |
+|---|---|---|---|---|---|---|---|
+| conv_demo_001 | accepted | 5 | 1 | 1 | 2 | 1 | 0 |
+| conv_demo_002 | accepted | 3 | 0 | 0 | 2 | 1 | 0 |
+| conv_demo_003 | rejected: `'agent_said' is empty` | 0 | 0 | 0 | 0 | 0 | 0 |
 
 `python -m ava_eval report --session conv_demo_001`:
 
@@ -213,7 +213,7 @@ Claim verdicts
 
 Conversations
 ------------------------------------------------------------------------
-  conv_demo_001              5 turns | contradicted 1 | not_found 1 | supported 2 | skipped 1
+  conv_demo_001              5 turns | contradicted 1 | not_found 1 | supported 2 | skipped 1 | unjudged 0
 
 Flagged claims (2)
 ------------------------------------------------------------------------
