@@ -11,6 +11,7 @@ rather than hoped for.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 
 import pytest
@@ -18,6 +19,7 @@ import pytest
 from ava_eval import config
 from ava_eval.db import store
 from ava_eval.llm import load_prompt
+from ava_eval.llm.client import LlmError
 from ava_eval.models import (
     Claim,
     ConversationStatus,
@@ -99,7 +101,9 @@ def test_contradicted_is_never_retried(seeded: str, monkeypatch: pytest.MonkeyPa
     claim = _claim()
 
     with store.connect(seeded) as conn:
-        verdicts = judge_claims(conn, [claim], {"c0": store.search_chunks(conn, _query(), 5)})
+        verdicts = judge_claims(
+            conn, [claim], {"c0": store.search_chunks(conn, _query(), 5)}
+        ).verdicts
 
     assert len(calls) == 1, "the judge was called a second time for a CONTRADICTED claim"
     assert verdicts[0].verdict == Verdict.CONTRADICTED
@@ -110,7 +114,9 @@ def test_contradicted_is_never_retried(seeded: str, monkeypatch: pytest.MonkeyPa
 def test_supported_is_never_retried(seeded: str, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _script(monkeypatch, [Verdict.SUPPORTED])
     with store.connect(seeded) as conn:
-        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 5)})
+        verdicts = judge_claims(
+            conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 5)}
+        ).verdicts
 
     assert len(calls) == 1
     assert verdicts[0].attempts == 1
@@ -122,7 +128,9 @@ def test_not_found_retries_and_tags_kb_gap_when_still_not_found(
     """Wider search found more, judged it, still nothing: the KB genuinely lacks it."""
     calls = _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.NOT_FOUND])
     with store.connect(seeded) as conn:
-        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+        verdicts = judge_claims(
+            conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)}
+        ).verdicts
 
     assert len(calls) == 2, "the NOT_FOUND claim was not retried"
     assert calls[1] > calls[0], "the retry did not widen the search"
@@ -137,7 +145,9 @@ def test_not_found_that_the_retry_rescues_is_tagged_retrieval_miss(
     """The content was there all along; our first search missed it."""
     _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.SUPPORTED])
     with store.connect(seeded) as conn:
-        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+        verdicts = judge_claims(
+            conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)}
+        ).verdicts
 
     assert verdicts[0].verdict == Verdict.SUPPORTED
     assert verdicts[0].tag == VerdictTag.RETRIEVAL_MISS
@@ -150,7 +160,9 @@ def test_a_contradiction_found_on_retry_still_counts_as_a_retrieval_miss(
     """The tag describes our retrieval, the verdict describes Ava. Both are kept."""
     _script(monkeypatch, [Verdict.NOT_FOUND, Verdict.CONTRADICTED])
     with store.connect(seeded) as conn:
-        verdicts = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+        verdicts = judge_claims(
+            conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)}
+        ).verdicts
 
     assert verdicts[0].verdict == Verdict.CONTRADICTED
     assert verdicts[0].tag == VerdictTag.RETRIEVAL_MISS
@@ -168,7 +180,8 @@ def test_retry_is_recorded_as_attempt_two(seeded: str, monkeypatch: pytest.Monke
 
 def test_no_claims_is_not_an_error(seeded: str) -> None:
     with store.connect(seeded) as conn:
-        assert judge_claims(conn, [], {}) == []
+        batch = judge_claims(conn, [], {})
+    assert batch.verdicts == [] and batch.failures == {}
 
 
 # --- rendering and prompts ------------------------------------------------
@@ -234,3 +247,184 @@ def test_every_prompt_template_is_loadable() -> None:
     assert load_prompt("classify_turn", caller_asked="q", agent_said="a")
     assert load_prompt("decompose_claims", session_id="s", transcript="t")
     assert load_prompt("judge_claim", subject_tag="s", claim_text="c", excerpts="e")
+
+
+# --- live judge and per-claim failures ------------------------------------
+
+_CHUNK_ID_RE = re.compile(r"chunk_id: (\S+)")
+
+
+def _use_live_judge(monkeypatch: pytest.MonkeyPatch, answer) -> list[str]:
+    """Switch step 6 to the live path with a fake model. Returns every prompt sent.
+
+    ``answer(prompt, call_number)`` returns a JudgeResponse or raises. Answers are
+    chosen from the prompt, not call order, because the first pass is threaded.
+    conftest's force_offline restores stub mode for the next test.
+    """
+    object.__setattr__(config.settings, "stub_llm", False)
+    prompts: list[str] = []
+
+    def fake_generate_structured(prompt, schema, **kwargs):
+        assert schema is JudgeResponse
+        prompts.append(prompt)
+        return answer(prompt, len(prompts))
+
+    monkeypatch.setattr(s6_judge, "generate_structured", fake_generate_structured)
+    return prompts
+
+
+def _first_shown_chunk(prompt: str) -> str:
+    """The first chunk id rendered into a judge prompt."""
+    return _CHUNK_ID_RE.search(prompt).group(1)
+
+
+def _verdict_count(conn: store.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) AS n FROM verdicts").fetchone()["n"]
+
+
+def test_live_prompt_carries_claim_subject_and_every_chunk_id(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prompts = _use_live_judge(
+        monkeypatch,
+        lambda p, n: JudgeResponse(
+            verdict=Verdict.SUPPORTED, rationale="r", evidence_chunk_id=_first_shown_chunk(p)
+        ),
+    )
+    with store.connect(seeded) as conn:
+        chunks = store.search_chunks(conn, _query(), 3)
+        judge_claims(conn, [_claim()], {"c0": chunks})
+
+    prompt = prompts[0]
+    assert "the minimum gpa is 2.0" in prompt
+    assert "Subject: S" in prompt
+    assert all(f"chunk_id: {c.chunk_id}" in prompt for c in chunks)
+    assert "{{" not in prompt
+
+
+def test_live_verdict_citing_a_shown_chunk_is_saved(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_live_judge(
+        monkeypatch,
+        lambda p, n: JudgeResponse(
+            verdict=Verdict.CONTRADICTED, rationale="r", evidence_chunk_id=_first_shown_chunk(p)
+        ),
+    )
+    with store.connect(seeded) as conn:
+        chunks = store.search_chunks(conn, _query(), 3)
+        batch = judge_claims(conn, [_claim()], {"c0": chunks})
+
+    assert batch.failures == {}
+    assert batch.verdicts[0].evidence_chunk_id == chunks[0].chunk_id
+
+
+def test_made_up_evidence_id_fails_the_claim_and_saves_nothing(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hallucinated id would silently break the join to kb_chunks."""
+    _use_live_judge(
+        monkeypatch,
+        lambda p, n: JudgeResponse(
+            verdict=Verdict.SUPPORTED, rationale="r", evidence_chunk_id="k999"
+        ),
+    )
+    with store.connect(seeded) as conn:
+        batch = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+        assert _verdict_count(conn) == 0
+
+    assert batch.verdicts == []
+    assert "k999" in batch.failures["c0"]
+
+
+@pytest.mark.parametrize("verdict", [Verdict.SUPPORTED, Verdict.CONTRADICTED])
+def test_a_flag_without_evidence_fails_the_claim(
+    seeded: str, monkeypatch: pytest.MonkeyPatch, verdict: Verdict
+) -> None:
+    _use_live_judge(
+        monkeypatch,
+        lambda p, n: JudgeResponse(verdict=verdict, rationale="r", evidence_chunk_id=""),
+    )
+    with store.connect(seeded) as conn:
+        batch = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+
+    assert batch.verdicts == []
+    assert "c0" in batch.failures
+
+
+def test_not_found_without_evidence_is_accepted(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_live_judge(
+        monkeypatch,
+        lambda p, n: JudgeResponse(verdict=Verdict.NOT_FOUND, rationale="r", evidence_chunk_id=""),
+    )
+    with store.connect(seeded) as conn:
+        batch = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+
+    assert batch.failures == {}
+    assert batch.verdicts[0].tag == VerdictTag.KB_GAP
+
+
+def test_one_failed_claim_does_not_lose_the_others(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def answer(prompt: str, n: int) -> JudgeResponse:
+        if "FAIL-ME" in prompt:
+            raise LlmError("quota exhausted")
+        return JudgeResponse(
+            verdict=Verdict.SUPPORTED, rationale="r", evidence_chunk_id=_first_shown_chunk(prompt)
+        )
+
+    _use_live_judge(monkeypatch, answer)
+    claims = [
+        Claim(claim_id=cid, session_id="s1", pair_index=0, subject_tag="S", text=text)
+        for cid, text in [("c0", "claim zero"), ("c1", "FAIL-ME claim"), ("c2", "claim two")]
+    ]
+    with store.connect(seeded) as conn:
+        store.replace_claims_for_session(conn, "s1", claims)
+        chunks = store.search_chunks(conn, _query(), 3)
+        batch = judge_claims(conn, claims, {c.claim_id: chunks for c in claims})
+        assert _verdict_count(conn) == 2
+
+    assert sorted(v.claim_id for v in batch.verdicts) == ["c0", "c2"]
+    assert batch.failures == {"c1": "quota exhausted"}
+
+
+def test_failed_retry_keeps_the_first_pass_not_found(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry never ran, so no kb_gap/retrieval_miss tag can be claimed."""
+
+    def answer(prompt: str, n: int) -> JudgeResponse:
+        if n == 1:
+            return JudgeResponse(
+                verdict=Verdict.NOT_FOUND, rationale="nothing", evidence_chunk_id=""
+            )
+        raise LlmError("retry blew up")
+
+    _use_live_judge(monkeypatch, answer)
+    with store.connect(seeded) as conn:
+        batch = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+
+    assert batch.failures == {}
+    verdict = batch.verdicts[0]
+    assert (verdict.verdict, verdict.attempts, verdict.tag) == (Verdict.NOT_FOUND, 1, None)
+    assert "retry failed: retry blew up" in verdict.rationale
+
+
+def test_failed_wider_search_keeps_the_first_pass_not_found(
+    seeded: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _script(monkeypatch, [Verdict.NOT_FOUND])
+
+    def broken_retrieval(*args, **kwargs):
+        raise LlmError("embedding failed")
+
+    monkeypatch.setattr(s6_judge, "retrieve_for_claims", broken_retrieval)
+    with store.connect(seeded) as conn:
+        batch = judge_claims(conn, [_claim()], {"c0": store.search_chunks(conn, _query(), 3)})
+
+    verdict = batch.verdicts[0]
+    assert (verdict.verdict, verdict.attempts, verdict.tag) == (Verdict.NOT_FOUND, 1, None)
+    assert "embedding failed" in verdict.rationale
