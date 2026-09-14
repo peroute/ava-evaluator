@@ -182,6 +182,15 @@ def test_excerpts_carry_chunk_ids(seeded: str) -> None:
     assert all(c.chunk_id in rendered for c in chunks)
 
 
+def test_excerpts_cite_the_chunk_header_as_source(seeded: str) -> None:
+    """The header is how the judge knows which program an excerpt belongs to."""
+    with store.connect(seeded) as conn:
+        chunks = store.search_chunks(conn, _query(), 1)
+    rendered = render_excerpts(chunks)
+    assert "    source: S\n" in rendered
+    assert "d.docx" not in rendered
+
+
 def test_dimension_mismatch_explains_itself(seeded: str) -> None:
     """Swapping embedding model or dimension without re-indexing must say so.
 

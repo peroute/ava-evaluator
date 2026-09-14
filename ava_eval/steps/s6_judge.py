@@ -81,6 +81,10 @@ def render_excerpts(chunks: Sequence[RetrievedChunk]) -> str:
     Each excerpt carries its ``chunk_id`` because the judge has to name the one
     that decided the verdict. Without that, a flag would be an assertion with no
     way to check it — and checkability is the entire product here.
+
+    ``source`` is the chunk's ``Group > Topic > Label`` header. It is how the
+    judge knows which program an excerpt belongs to; the file name is the same
+    for every chunk and would tell it nothing.
     """
     if not chunks:
         return "(No excerpts were retrieved for this claim.)"
@@ -89,7 +93,7 @@ def render_excerpts(chunks: Sequence[RetrievedChunk]) -> str:
     for chunk in chunks:
         parts.append(
             f"--- chunk_id: {chunk.chunk_id}\n"
-            f"    source: {chunk.source_doc} > {chunk.section}\n"
+            f"    source: {chunk.section}\n"
             f"    similarity: {chunk.score:.3f}\n\n"
             f"{chunk.text}"
         )
@@ -204,9 +208,18 @@ def judge_claim(claim: Claim, chunks: Sequence[RetrievedChunk]) -> JudgeResponse
 
 
 def _to_verdict(
-    claim_id: str, response: JudgeResponse, attempts: int, tag: VerdictTag | None
+    claim_id: str,
+    response: JudgeResponse,
+    attempts: int,
+    tag: VerdictTag | None,
+    kb_content_hash: str | None,
 ) -> ClaimVerdict:
-    """Convert a judge response into a persistable verdict."""
+    """Convert a judge response into a persistable verdict.
+
+    ``kb_content_hash`` records which KB version the verdict was judged against.
+    Chunk ids are positional, so after a re-index the same id can name different
+    text; the hash is what lets the report warn about that.
+    """
     return ClaimVerdict(
         claim_id=claim_id,
         verdict=response.verdict,
@@ -214,6 +227,7 @@ def _to_verdict(
         rationale=response.rationale,
         evidence_chunk_id=response.evidence_chunk_id or None,
         attempts=attempts,
+        kb_content_hash=kb_content_hash,
     )
 
 
@@ -237,6 +251,8 @@ def judge_claims(
 
     by_id = {claim.claim_id: claim for claim in claims}
     first_pass: dict[str, JudgeResponse] = {}
+    # Read once so every verdict in this batch records the same KB version.
+    kb_hash = store.current_kb_hash(conn)
 
     # Judge calls are independent per claim -- same justification as step 5.
     with ThreadPoolExecutor(max_workers=settings.max_workers) as pool:
@@ -258,34 +274,34 @@ def judge_claims(
     for claim in claims:
         response = first_pass[claim.claim_id]
         if response.verdict != Verdict.NOT_FOUND:
-            verdicts.append(_to_verdict(claim.claim_id, response, attempts=1, tag=None))
+            verdicts.append(
+                _to_verdict(claim.claim_id, response, attempts=1, tag=None, kb_content_hash=kb_hash)
+            )
 
     if needs_retry:
         wider_k = settings.top_k * settings.retry_k_multiplier
         wider = retrieve_for_claims(conn, needs_retry, k=wider_k, attempt=2)
 
+        # Every NOT_FOUND gets the second look, unconditionally. Search is exact
+        # and has no score floor, so the wider top-k always contains the first
+        # top-k plus new chunks; a "did we find anything new?" shortcut could
+        # never fire on a real KB. Skipping the retry would also risk blaming
+        # TTU's docs (kb_gap) for what was really our search missing.
         for claim in needs_retry:
-            original_ids = {c.chunk_id for c in retrievals.get(claim.claim_id, [])}
-            widened = wider.get(claim.claim_id, [])
-            fresh = [c for c in widened if c.chunk_id not in original_ids]
-
-            if not fresh:
-                # The wider net caught nothing new, so the first search was not
-                # the limiting factor. The knowledge base genuinely lacks this.
-                verdicts.append(
-                    _to_verdict(claim.claim_id, first_pass[claim.claim_id], 1, VerdictTag.KB_GAP)
-                )
-                continue
-
-            retry_response = judge_claim(claim, widened)
+            retry_response = judge_claim(claim, wider.get(claim.claim_id, []))
             if retry_response.verdict == Verdict.NOT_FOUND:
-                verdicts.append(_to_verdict(claim.claim_id, retry_response, 2, VerdictTag.KB_GAP))
+                # Even with the wider set, nothing covers this claim.
+                verdicts.append(
+                    _to_verdict(claim.claim_id, retry_response, 2, VerdictTag.KB_GAP, kb_hash)
+                )
             else:
                 # The content existed all along; our first search missed it.
                 # That is a fact about our retrieval quality, not about Ava or
                 # about TTU's knowledge base, and it is tagged as such.
                 verdicts.append(
-                    _to_verdict(claim.claim_id, retry_response, 2, VerdictTag.RETRIEVAL_MISS)
+                    _to_verdict(
+                        claim.claim_id, retry_response, 2, VerdictTag.RETRIEVAL_MISS, kb_hash
+                    )
                 )
 
     for verdict in verdicts:
