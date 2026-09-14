@@ -147,6 +147,50 @@ def _fallback_session_id(payload: Any, source_file: str, position: int) -> str:
     return f"{source_file}#{position}"
 
 
+def _ingest_one(
+    conn: store.Connection,
+    payload: Any,
+    source_file: str,
+    position: int,
+    report: IngestReport,
+) -> None:
+    """Validate and persist one payload, recording either outcome in ``report``."""
+    try:
+        conversation = parse_export_v1(payload, source_file)
+    except TranscriptFormatError as exc:
+        session_id = _fallback_session_id(payload, source_file, position)
+        store.upsert_conversation(
+            conn, session_id, source_file, ConversationStatus.REJECTED, str(exc)
+        )
+        report.rejected.append(
+            RejectedConversation(session_id=session_id, source_file=source_file, reason=str(exc))
+        )
+        return
+
+    store.upsert_conversation(
+        conn, conversation.session_id, source_file, ConversationStatus.ACCEPTED
+    )
+    store.replace_turns(conn, conversation.session_id, conversation.turns)
+    report.accepted.append(conversation)
+
+
+def ingest_payload(
+    payload: Any,
+    source_file: str = "api-submission.json",
+    database_url: str | None = None,
+) -> IngestReport:
+    """Validate and persist one in-memory transcript using the normal Step 1 rules.
+
+    The returned report has exactly one accepted or rejected conversation. A
+    rejection is persisted just like a rejected conversation read from a file,
+    so API submissions remain visible in the existing reports.
+    """
+    report = IngestReport()
+    with store.connect(database_url) as conn:
+        _ingest_one(conn, payload, source_file, 0, report)
+    return report
+
+
 def ingest_directory(input_path: Path, database_url: str | None = None) -> IngestReport:
     """Ingest every transcript JSON under ``input_path`` into the database.
 
@@ -176,24 +220,6 @@ def ingest_directory(input_path: Path, database_url: str | None = None) -> Inges
                 continue
 
             for position, payload in enumerate(payloads):
-                try:
-                    conversation = parse_export_v1(payload, name)
-                except TranscriptFormatError as exc:
-                    session_id = _fallback_session_id(payload, name, position)
-                    store.upsert_conversation(
-                        conn, session_id, name, ConversationStatus.REJECTED, str(exc)
-                    )
-                    report.rejected.append(
-                        RejectedConversation(
-                            session_id=session_id, source_file=name, reason=str(exc)
-                        )
-                    )
-                    continue
-
-                store.upsert_conversation(
-                    conn, conversation.session_id, name, ConversationStatus.ACCEPTED
-                )
-                store.replace_turns(conn, conversation.session_id, conversation.turns)
-                report.accepted.append(conversation)
+                _ingest_one(conn, payload, name, position, report)
 
     return report

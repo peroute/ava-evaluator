@@ -1,4 +1,4 @@
-"""Read-only HTTP layer for the TTU staff frontend.
+"""HTTP layer for transcript evaluation and read-only result browsing.
 
 A browser cannot talk to PostgreSQL directly (and must never hold database
 credentials), so results need HTTP regardless of what the frontend ends up
@@ -8,8 +8,8 @@ mostly translate query parameters into arguments and hand back rows. If the
 frontend ever needs to reimplement the severity rollup in JavaScript, something
 has gone wrong here.
 
-Every endpoint is a read. Nothing in this API can change a verdict — evaluation
-happens through the CLI, and results are evidence, not an editable document.
+The one write endpoint submits a transcript to the existing pipeline. Verdicts
+remain non-editable results; all other endpoints are read-only views.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from .. import evaluation_service
 from ..config import settings
 from ..db import store
 
@@ -34,9 +35,28 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.post("/evaluations")
+def create_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate, persist and synchronously evaluate one transcript payload."""
+    try:
+        return evaluation_service.submit_and_evaluate(payload)
+    except evaluation_service.TranscriptRejectedError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"session_id": exc.session_id, "error": exc.reason},
+        ) from exc
+    except evaluation_service.EvaluationUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except evaluation_service.EvaluationFailedError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"session_id": exc.session_id, "error": str(exc)},
+        ) from exc
 
 
 @app.get("/health")
