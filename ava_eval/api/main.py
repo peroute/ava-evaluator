@@ -92,6 +92,7 @@ def list_claims(
     tag: str | None = Query(None, description="kb_gap | retrieval_miss"),
     subject: str | None = Query(None, description="exact subject_tag match"),
     session: str | None = Query(None, description="restrict to one session id"),
+    unjudged: bool = Query(False, description="only claims step 6 could not judge"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -111,6 +112,7 @@ def list_claims(
             subject_tag=subject,
             limit=limit,
             offset=offset,
+            unjudged=unjudged,
         )
 
 
