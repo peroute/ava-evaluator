@@ -120,11 +120,17 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
         print(
             f"  + {result.session_id:<24} {result.claim_count:>3} claims | "
             f"contradicted {result.contradicted} | not_found {result.not_found} | "
-            f"supported {result.supported}"
+            f"supported {result.supported} | failed {len(result.failed_claims)}"
         )
+        for claim_id, error in result.failed_claims.items():
+            print(f"      x {claim_id}: {error}")
 
-    print(f"\n{report.claim_count} claims judged across {len(report.sessions)} conversations.")
-    return 1 if report.failures else 0
+    failed = sum(len(s.failed_claims) for s in report.sessions)
+    print(f"\n{report.claim_count} claims across {len(report.sessions)} conversations.")
+    if failed:
+        print(f"{failed} claims could not be judged (UNJUDGED) -- re-run evaluate to retry them.")
+    # Exit 1 on a partial run too, so `evaluate && report` and CI don't treat it as clean.
+    return 1 if report.failures or report.claim_failures else 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
