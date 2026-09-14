@@ -63,36 +63,44 @@ carries on. → [Step 1 details](steps/s1-ingest.md)
 ## Step 2: Index the KB → `kb_documents`, `kb_chunks`
 
 ```
-Indexed 3 documents (9 chunks)
-  + admissions_requirements.docx                    3 chunks
-  + online_programs.docx                            3 chunks
-  + tuition_and_aid.docx                            3 chunks
+Indexed sample_online.docx: 11 chunks (6 question, 5 reference)
+  6 topics, 3 placed under a catalog group
+
+Listed in a catalog but no topic in the KB (1)
+  ? Online Bachelor of Arts in History  (listed in: Bachelor's Degrees)
 ```
 
-One chunk per section here, because the sample sections are short (well under 1200 characters). The ids spell out
-the document and section:
+The sample KB is one document in the same format as TTU's real one: bold "If asked questions about X, answer with"
+lines open 6 topics. Every **question** becomes its own chunk (`q`). A program page's small descriptive sections are
+**packed** into one chunk (`r`). The three program pages are listed by the "Bachelor's Degrees" catalog, so they get
+that group in their header. History is listed there too but has no page, which the output points out.
 
-| chunk_id | section | chars |
-|---|---|---|
-| `admissions_requirements__undergraduate_admissions_2_1_minimum_gra__000` | Undergraduate Admissions > 2.1 Minimum Grade Point Average | 306 |
-| `admissions_requirements__undergraduate_admissions_2_2_program_spe__001` | Undergraduate Admissions > 2.2 Program Specific Requirements | 404 |
-| `admissions_requirements__undergraduate_admissions_2_3_official_tr__002` | Undergraduate Admissions > 2.3 Official Transcripts | 238 |
-| `online_programs__online_program_formats_bachelor_of_busin__000` | Online Program Formats > Bachelor of Business Administration in General Business | 350 |
-| … 5 more | | |
+| chunk_id | kind | section | chars |
+|---|---|---|---|
+| `t01.r01` | reference | Undergraduate Admissions > Overview | 117 |
+| `t01.q01` | qa | Undergraduate Admissions > What GPA do I need to be admitted? | 367 |
+| `t01.q02` | qa | Undergraduate Admissions > Do programs set their own requirements? | 493 |
+| `t01.q03` | qa | Undergraduate Admissions > Do I need to send official transcripts? | 304 |
+| `t02.r01` | reference | Bachelor's Degrees > Overview | 278 |
+| `t03.r01` | reference | Bachelor's Degrees > Online Bachelor of Business Administration in General Business > Overview; Prerequisites; Application Deadlines > Late Fall; Application Deadlines > Early Spring | 745 |
+| … 5 more (`t04.r01`, `t05.r01`, `t06.q01`–`t06.q03`) | | | |
 
-The GPA **table** was extracted and labelled. This is the full text of chunk `…2_2_program_spe__001`:
+The GPA **table** was extracted, labelled, and kept inside the answer it belongs to. This is the full text of chunk
+`t01.q02`:
 
 ```
-Where a program states a requirement different from the university minimum, the program requirement applies.
+Undergraduate Admissions
 
+Do programs set their own requirements?
+Yes. Where a program states a requirement different from the university minimum, the program requirement applies.
+Program Requirements
 Program: Online BBA in General Business | Minimum GPA: 2.0 | Transferable Credit Hours Required: 30
-
 Program: Online BS in Computer Science | Minimum GPA: 2.75 | Transferable Credit Hours Required: 30
-
 Program: Online BA in Psychology | Minimum GPA: 2.0 | Transferable Credit Hours Required: 24
 ```
 
-A naive extractor would have returned none of those three rows. → [Step 2 details](steps/s2-index-kb.md)
+A naive extractor would have returned none of those three rows. The bold "Program Requirements" line sits inside the
+answer, so it stays with its question instead of starting a chunk of its own. → [Step 2 details](steps/s2-index-kb.md)
 
 ## Step 3: Classify → `turn_classifications`
 
@@ -130,29 +138,32 @@ Top 5 chunks per claim (attempt 1). Scores are cosine similarity.
 
 | claim | rank 0 (best) | score |
 |---|---|---|
-| `p1__c0` asynchronous BBA | `online_programs…bachelor_of_busin__000` | 0.684 |
-| `p2__c0` GPA 2.5 | `admissions…2_1_minimum_gra__000` | 0.476 |
-| `p3__c0` transcripts | `admissions…2_3_official_tr__002` | 0.602 |
-| `p4__c0` parking | `admissions…2_2_program_spe__001` | **0.166** |
+| `p1__c0` asynchronous BBA | `t03.r01` (BBA program page) | 0.553 |
+| `p2__c0` GPA 2.5 | `t01.q01` (What GPA do I need to be admitted?) | 0.343 |
+| `p3__c0` transcripts | `t01.q03` (Do I need to send official transcripts?) | 0.496 |
+| `p4__c0` parking | `t01.q02` (Do programs set their own requirements?) | **0.182** |
 
-The first three found the right section. Parking's best match scores only 0.166, because nothing in the KB is about parking.
-For `p2__c0`, the GPA table chunk came second (0.349). → [Step 5 details](steps/s5-retrieve.md)
+The first three found the right chunk. Parking's best match scores only 0.182, because nothing in the KB is about
+parking. For `p2__c0`, the GPA table chunk `t01.q02` came second (0.318). → [Step 5 details](steps/s5-retrieve.md)
 
 ## Step 6: Judge → `verdicts`
 
 | claim | verdict | tag | attempts | evidence | rationale |
 |---|---|---|---|---|---|
-| `p1__c0` | `SUPPORTED` | | 1 | `online_programs…bachelor_of_busin__000` | [stub] Excerpt covers 100% of the claim's content words. |
-| `p2__c0` | `CONTRADICTED` | | 1 | `admissions…2_1_minimum_gra__000` | [stub] Claim states ['2.5'] but the excerpt states ['2.0', '4.0']. |
-| `p3__c0` | `SUPPORTED` | | 1 | `admissions…2_3_official_tr__002` | [stub] Excerpt covers 100% of the claim's content words. |
+| `p1__c0` | `SUPPORTED` | | 1 | `t03.r01` | [stub] Excerpt covers 100% of the claim's content words. |
+| `p2__c0` | `CONTRADICTED` | | 1 | `t01.q01` | [stub] Claim states ['2.5'] but the excerpt states ['2.0', '4.0']. |
+| `p3__c0` | `SUPPORTED` | | 1 | `t01.q03` | [stub] Excerpt covers 100% of the claim's content words. |
 | `p4__c0` | `NOT_FOUND` | `kb_gap` | **2** | | [stub] Best excerpt overlapped only 25% of the claim. |
+
+Each verdict also stores the KB's content hash at judging time (`kb_content_hash`), which is what lets step 7 warn if the
+KB is re-indexed later.
 
 What happened to `p4__c0`, following the [retry flow](steps/s6-judge.md#how-the-code-works):
 
 1. First pass: `NOT_FOUND`.
-2. Searched again with `k = 5 × 3 = 15`, saved as `attempt = 2`. The index only has 9 chunks, so all 9 came back,
-   **4 of which were new**.
-3. New evidence existed, so it was judged again. Still `NOT_FOUND` → tagged `kb_gap`, `attempts = 2`.
+2. Searched again with `k = 5 × 3 = 15`, saved as `attempt = 2`. The index only has 11 chunks, so all 11 came back,
+   **6 of which were new**.
+3. Judged again on all 11. Still `NOT_FOUND` → tagged `kb_gap`, `attempts = 2`.
 
 If the second judgement had come back `SUPPORTED` or `CONTRADICTED`, that would have become the verdict, tagged
 `retrieval_miss`: the evidence was in the KB all along, and our first search missed it.
@@ -161,7 +172,8 @@ If the second judgement had come back `SUPPORTED` or `CONTRADICTED`, that would 
 
 **Live:** the stub's rule is "same topic words, no numbers in common". A live judge would read the excerpts, apply
 the general-policy rule, and quote the decisive wording, e.g. *"Excerpt states 'Minimum GPA: 2.0' for the Online
-BBA in General Business."* → [Step 6 details](steps/s6-judge.md)
+BBA in General Business."* It would also see, from each excerpt's `source:` header, which program the excerpt
+belongs to. → [Step 6 details](steps/s6-judge.md)
 
 ## Step 7: Roll up → views, report, API
 
@@ -189,7 +201,7 @@ BBA in General Business."* → [Step 6 details](steps/s6-judge.md)
 ========================================================================
 AVA FAITHFULNESS REPORT
 ========================================================================
-2 conversations | 8 turns | 6 claims | 9 KB chunks indexed
+2 conversations | 8 turns | 6 claims | 11 KB chunks indexed
 
 Claim verdicts
 ------------------------------------------------------------------------
@@ -209,7 +221,7 @@ Flagged claims (2)
     subject : [stub] unresolved subject
     claim   : For the Online BBA in General Business, the minimum cumulative grade point average required is 2.5 from the most recently attended institution.
     why     : [stub] Claim states ['2.5'] but the excerpt states ['2.0', '4.0'].
-    evidence: admissions_requirements.docx > Undergraduate Admissions > 2.1 Minimum Grade Point Average (admissions_requirements__undergraduate_admissions_2_1_minimum_gra__000)
+    evidence: Undergraduate Admissions > What GPA do I need to be admitted? (t01.q01)
 
   NOT_FOUND [kb_gap]  conv_demo_001 pair 4
     subject : [stub] unresolved subject
@@ -219,7 +231,11 @@ Flagged claims (2)
 
 The header counts cover **every** conversation (4 supported = 2 from each demo), while the sections below are filtered to
 `conv_demo_001`. The same data is at `GET /conversations/conv_demo_001` and
-`GET /claims/conv_demo_001__p4__c0` (the second shows attempts 1 and 2). → [Step 7 details](steps/s7-aggregate.md)
+`GET /claims/conv_demo_001__p4__c0` (the second shows attempts 1 and 2).
+
+If the KB is re-indexed after a different document version, each of these flags gets an extra line,
+`[!] the knowledge base changed since this verdict`, because chunk ids like `t01.q01` may now name a different passage.
+Re-run `evaluate` to clear it. → [Step 7 details](steps/s7-aggregate.md)
 
 ---
 

@@ -26,7 +26,7 @@ recompute from the underlying rows every time you read them. This module only re
 
 | View | Level | What it adds |
 |---|---|---|
-| [`v_claim_results`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L157) | claim | claim + verdict + **evidence chunk text, section, source doc, version date** (LEFT JOINs, so unjudged claims still appear) |
+| [`v_claim_results`](../../ava_eval/db/migrations/versions/0003_kb_structure.py) | claim | claim + verdict + **evidence chunk text, section, source doc, version date, chunk kind**, and `kb_changed_since_judged` (LEFT JOINs, so unjudged claims still appear). Redefined in migration 0003 |
 | [`v_turn_severity`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L182) | helper | per turn: counts of each verdict and `MAX(severity)` where CONTRADICTED=3, NOT_FOUND=2, SUPPORTED=1 |
 | [`v_turn_results`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L203) | turn | **the worst verdict wins**. Turns without verdicts are labelled, never dropped (see below) |
 | [`v_conversation_summary`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L230) | conversation | counts of contradicted / not_found / supported / skipped turns, and includes rejected conversations |
@@ -77,6 +77,11 @@ Interactive docs at `http://127.0.0.1:8000/docs`.
   never by editing 0001.
 - `report --session X` filters conversations, turns and flagged claims, but the **header totals (`stats`) are always
   across every conversation**.
+- **Evidence can go stale after a re-index.** Chunk ids are positional (`t11.r02`), so when TTU edits the document the
+  same id can name a different passage. `v_claim_results.kb_changed_since_judged` compares the verdict's stored KB hash
+  with the current one, and the report prints `[!] the knowledge base changed since this verdict` on those rows. It
+  warns rather than deletes, by design: re-run `evaluate` to refresh them. Verdicts saved before migration 0003 have no
+  hash and are always flagged.
 - CORS is `allow_origins=["*"]` for local development. Restrict it before the API is reachable from anywhere real.
 
 ## Tests

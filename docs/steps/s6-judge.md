@@ -36,9 +36,7 @@ flowchart TD
     A[All claims] -->|parallel thread pool| B[judge_claim: first pass]
     B -->|SUPPORTED or CONTRADICTED| F[Final. attempts=1, tag=none]
     B -->|NOT_FOUND| R[retrieve_for_claims with k × 3, attempt=2]
-    R --> N{Any chunks not seen<br/>in attempt 1?}
-    N -->|no| G1[NOT_FOUND + kb_gap<br/>attempts=1]
-    N -->|yes| J[judge_claim again on widened set]
+    R --> J[judge_claim again on widened set]
     J -->|NOT_FOUND| G2[NOT_FOUND + kb_gap<br/>attempts=2]
     J -->|SUPPORTED or CONTRADICTED| M[that verdict + retrieval_miss<br/>attempts=2]
 ```
@@ -47,14 +45,16 @@ flowchart TD
 2. Everything that isn't `NOT_FOUND` is final.
 3. `NOT_FOUND` claims are searched again through [`retrieve_for_claims`](../../ava_eval/steps/s5_retrieve.py#L56) with
    `k = AVA_TOP_K × AVA_RETRY_K_MULTIPLIER` and `attempt=2`.
-4. For each one, compare with the first attempt ([line 268](../../ava_eval/steps/s6_judge.py#L268)):
-   - **No new chunks** → the wider net caught nothing new, so the KB really doesn't have it → `kb_gap` without spending another judge call.
-   - **New chunks** → judge again on the whole widened set (one claim after another). Still `NOT_FOUND` → `kb_gap`.
-     Anything else → the evidence was there all along → `retrieval_miss`.
+4. Each one is judged again on the whole widened set (one claim after another), unconditionally. Still `NOT_FOUND` →
+   `kb_gap`. Anything else → the evidence was there all along → `retrieval_miss`.
 5. Save every verdict.
 
 [`render_excerpts`](../../ava_eval/steps/s6_judge.py#L78) formats the chunks for the prompt. Each carries its
-`chunk_id`, source, section and similarity score, because the judge has to name the chunk it used.
+`chunk_id` (the judge has to name the chunk it used), its `source` (the chunk's `Group > Topic > Label` header, which
+is how the judge knows which program an excerpt belongs to), and its similarity score.
+
+Every verdict also stores the KB's content hash at judging time (`verdicts.kb_content_hash`), so step 7 can warn when
+a verdict was judged against an older version of the knowledge base.
 
 ## Stub vs live
 
