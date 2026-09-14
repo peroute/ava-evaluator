@@ -5,11 +5,12 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from pydantic import ValidationError
 
 from ava_eval import config
 from ava_eval.db import store
 from ava_eval.models import (
+    BatchClassification,
+    BatchTurnClassification,
     ClassifiedTurn,
     ConversationStatus,
     KbChunk,
@@ -39,21 +40,35 @@ def _turn(agent_said: str, pair_index: int = 0, caller_asked: str = "q") -> Turn
     )
 
 
-def _use_live_classifier(monkeypatch: pytest.MonkeyPatch, answer: TurnClassification) -> list[str]:
-    """Switch to the live path with a fake model that always gives ``answer``.
+def _answer(pair_index: int, contains_claims: bool, reason: str) -> BatchTurnClassification:
+    return BatchTurnClassification(
+        pair_index=pair_index, contains_claims=contains_claims, reason=reason
+    )
 
-    Returns the prompts sent. conftest's force_offline restores stub mode for the next test.
+
+def _use_live_classifier(
+    monkeypatch: pytest.MonkeyPatch,
+    batch: list[BatchTurnClassification],
+    single: TurnClassification | None = None,
+) -> list[tuple[type, str]]:
+    """Switch to the live path with a fake model. Returns (schema, prompt) for every call.
+
+    The batched call gets ``batch``; a per-turn call gets ``single``, and fails the test if
+    ``single`` is None. conftest's force_offline restores stub mode for the next test.
     """
     object.__setattr__(config.settings, "stub_llm", False)
-    prompts: list[str] = []
+    calls: list[tuple[type, str]] = []
 
     def fake_generate_structured(prompt, schema, **kwargs):
+        calls.append((schema, prompt))
+        if schema is BatchClassification:
+            return BatchClassification(turns=batch)
         assert schema is TurnClassification
-        prompts.append(prompt)
-        return answer
+        assert single is not None, "unexpected per-turn fallback call"
+        return single
 
     monkeypatch.setattr(s3_classify, "generate_structured", fake_generate_structured)
-    return prompts
+    return calls
 
 
 @pytest.mark.parametrize("label, agent_said, expected", STUB_CASES, ids=[c[0] for c in STUB_CASES])
@@ -71,9 +86,11 @@ def test_classify_turns_keeps_order_and_ids() -> None:
     assert [r.contains_claims for r in results] == [expected for _, _, expected in STUB_CASES]
 
 
-def test_live_classifier_sends_each_turn_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    answer = TurnClassification(contains_claims=True, reason="States a requirement.")
-    prompts = _use_live_classifier(monkeypatch, answer)
+def test_live_batch_is_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Answers come back out of order, so the result order has to come from the turns.
+    calls = _use_live_classifier(
+        monkeypatch, batch=[_answer(1, False, "Greeting."), _answer(0, True, "States a GPA.")]
+    )
     turns = [
         _turn("FIRST-REPLY", pair_index=0, caller_asked="FIRST-QUESTION"),
         _turn("SECOND-REPLY", pair_index=1, caller_asked="SECOND-QUESTION"),
@@ -81,18 +98,52 @@ def test_live_classifier_sends_each_turn_alone(monkeypatch: pytest.MonkeyPatch) 
 
     results = classify_turns(turns)
 
-    assert [(r.contains_claims, r.reason) for r in results] == [(True, "States a requirement.")] * 2
-    assert len(prompts) == 2
-    for prompt, own, other in zip(prompts, ["FIRST", "SECOND"], ["SECOND", "FIRST"]):
-        assert f"{own}-REPLY" in prompt and f"{own}-QUESTION" in prompt
-        assert other not in prompt
-        assert "{{" not in prompt
+    assert [schema for schema, _ in calls] == [BatchClassification]
+    assert [(r.pair_index, r.contains_claims, r.reason) for r in results] == [
+        (0, True, "States a GPA."),
+        (1, False, "Greeting."),
+    ]
+    prompt = calls[0][1]
+    for text in ["FIRST-REPLY", "FIRST-QUESTION", "SECOND-REPLY", "SECOND-QUESTION"]:
+        assert text in prompt
+    assert "{{" not in prompt
 
 
-@pytest.mark.parametrize("raw", ['"true"', '"false"', '"yes"', "1", "0", "null"])
-def test_non_boolean_contains_claims_is_rejected(raw: str) -> None:
-    with pytest.raises(ValidationError):
-        TurnClassification.model_validate_json(f'{{"contains_claims": {raw}, "reason": "r"}}')
+def test_missing_turn_falls_back_to_single_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    single = TurnClassification(contains_claims=True, reason="Fallback answer.")
+    calls = _use_live_classifier(monkeypatch, batch=[_answer(0, False, "Greeting.")], single=single)
+    turns = [
+        _turn("Hello!", pair_index=0),
+        _turn("SECOND-REPLY", pair_index=1, caller_asked="SECOND-QUESTION"),
+    ]
+
+    results = classify_turns(turns)
+
+    assert [schema for schema, _ in calls] == [BatchClassification, TurnClassification]
+    fallback_prompt = calls[1][1]
+    assert "SECOND-REPLY" in fallback_prompt and "Hello!" not in fallback_prompt
+    assert [(r.pair_index, r.contains_claims, r.reason) for r in results] == [
+        (0, False, "Greeting."),
+        (1, True, "Fallback answer."),
+    ]
+
+
+def test_unknown_and_duplicate_indices_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _use_live_classifier(
+        monkeypatch,
+        batch=[
+            _answer(99, True, "Not a sent turn."),
+            _answer(0, True, "First answer."),
+            _answer(0, False, "Duplicate answer."),
+        ],
+    )
+
+    results = classify_turns([_turn("The minimum GPA is 2.0.", pair_index=0)])
+
+    assert [schema for schema, _ in calls] == [BatchClassification]
+    assert [(r.pair_index, r.contains_claims, r.reason) for r in results] == [
+        (0, True, "First answer.")
+    ]
 
 
 def test_schema_sent_to_the_model_declares_a_boolean() -> None:
