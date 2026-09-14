@@ -115,9 +115,13 @@ def format_report(report: dict[str, Any]) -> str:
         lines.append(f"    claim   : {row['claim_text']}")
         lines.append(f"    why     : {row['rationale']}")
         if row["evidence_chunk_id"]:
+            lines.append(f"    evidence: {row['evidence_section']} ({row['evidence_chunk_id']})")
+        if row.get("kb_changed_since_judged"):
+            # Chunk ids are positional: after the KB changes, this id may name a
+            # different passage than the one the judge actually read.
             lines.append(
-                f"    evidence: {row['evidence_source_doc']} > {row['evidence_section']} "
-                f"({row['evidence_chunk_id']})"
+                "    [!] the knowledge base changed since this verdict -- the evidence shown "
+                "may not be what was judged; re-run evaluate"
             )
         lines.append("")
 
