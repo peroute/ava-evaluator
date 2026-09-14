@@ -1,4 +1,4 @@
-"""Step 4 — break flagged replies into self-contained claims.  [STUB]
+"""Step 4 — break flagged replies into self-contained claims.
 
 The hardest step, and the one that makes everything after it possible. Step 5
 searches the knowledge base using nothing but a claim's own text, so a claim
@@ -17,8 +17,8 @@ Two locked design decisions are implemented in the transcript rendering below:
   Throughput is handled in steps 5 and 6 where the calls are genuinely
   independent; here, keeping it sequential keeps failures easy to attribute.
 
-IMPLEMENTATION STATUS: stubbed. ``_decompose_stub`` runs offline;
-``_decompose_live`` is yours to write.
+``_decompose_stub`` runs offline (``AVA_STUB_LLM=1``); ``_decompose_live``
+calls Gemini.
 """
 
 from __future__ import annotations
@@ -92,16 +92,7 @@ def _decompose_live(
 ) -> ConversationClaims:
     """Ask Gemini to decompose a whole conversation into self-contained claims.
 
-    TODO(hedi): implement. Roughly::
-
-        prompt = load_prompt(
-            "decompose_claims",
-            session_id=session_id,
-            transcript=render_transcript(turns, classifications),
-        )
-        return generate_structured(prompt, ConversationClaims)
-
-    Things worth knowing before you write it:
+    Things worth knowing:
 
     * ``render_transcript`` above already produces the format the prompt's
       worked example uses. Keep them in sync — the example is what teaches the
@@ -113,15 +104,19 @@ def _decompose_live(
     * A returned turn with an empty ``claims`` list is a normal outcome, not an
       error. Step 3 is over-inclusive on purpose, so some flagged turns will
       correctly yield nothing. ``to_claims`` below already handles it.
-    * Validate that returned ``pair_index`` values actually exist in this
-      conversation before trusting them. A hallucinated index would attach
-      claims to the wrong turn, and a wrong attribution is worse than a missing
-      one because it still looks confident in the report.
+    * The model's ``pair_index`` values are not trusted here; ``to_claims``
+      drops any that are not in this conversation.
     """
-    raise NotImplementedError(
-        "Step 4 is not implemented yet. Run with AVA_STUB_LLM=1, or implement "
-        "_decompose_live in ava_eval/steps/s4_decompose.py."
+    # Nothing flagged means nothing to decompose -- don't pay for a call.
+    if not any(c.contains_claims for c in classifications.values()):
+        return ConversationClaims(turns=[])
+
+    prompt = load_prompt(
+        "decompose_claims",
+        session_id=session_id,
+        transcript=render_transcript(turns, classifications),
     )
+    return generate_structured(prompt, ConversationClaims)
 
 
 def decompose_conversation(
@@ -144,15 +139,22 @@ def to_claims(
     Claim ids are positional (``{session}__p{pair}__c{n}``) rather than random,
     so re-running step 4 on an unchanged conversation produces the same ids and
     the audit trail stays comparable between runs.
+
+    The position counter is kept per ``pair_index`` rather than per entry: if
+    the model returns the same turn twice, restarting at ``c0`` would produce
+    duplicate claim ids and the insert would fail for the whole conversation.
     """
     claims: list[Claim] = []
+    next_position: dict[int, int] = {}
     for turn_claims in response.turns:
         if turn_claims.pair_index not in valid_indices:
             continue
-        for position, extracted in enumerate(turn_claims.claims):
+        for extracted in turn_claims.claims:
             text = extracted.text.strip()
             if not text:
                 continue
+            position = next_position.get(turn_claims.pair_index, 0)
+            next_position[turn_claims.pair_index] = position + 1
             claims.append(
                 Claim(
                     claim_id=f"{session_id}__p{turn_claims.pair_index}__c{position}",
