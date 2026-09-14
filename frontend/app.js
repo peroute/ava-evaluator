@@ -13,7 +13,6 @@ const results = document.getElementById("results");
 const resultSession = document.getElementById("result-session");
 const summaryGrid = document.getElementById("summary-grid");
 const turnList = document.getElementById("turn-list");
-const healthStatus = document.getElementById("health-status");
 const stubWarning = document.getElementById("stub-warning");
 
 const KNOWN_STATES = new Set([
@@ -318,12 +317,9 @@ async function loadHealth() {
     const response = await fetch("/api/health", { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error("Health check failed");
     const health = await response.json();
-    healthStatus.textContent = `Evaluator online · ${displayValue(health.kb_chunks, "0")} KB chunks`;
-    healthStatus.classList.add("health-online");
     stubWarning.hidden = !(health.stub_llm === true || health.stub_embed === true);
   } catch {
-    healthStatus.textContent = "Evaluator status unavailable";
-    healthStatus.classList.add("health-offline");
+    stubWarning.hidden = true;
   }
 }
 

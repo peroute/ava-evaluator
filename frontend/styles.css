@@ -49,10 +49,6 @@ h4 { margin: 0; }
 }
 
 .header-copy { margin-bottom: 0; color: #d4d4d4; }
-.health-status { flex: 0 0 auto; padding: 7px 12px; border: 1px solid #666; border-radius: 999px; font-size: 0.82rem; }
-.health-online { border-color: #6eae8d; color: #b7e8ce; }
-.health-offline { border-color: #d8a4a4; color: #ffd1d1; }
-
 .stub-warning {
   display: flex;
   gap: 10px;
@@ -163,7 +159,6 @@ footer { padding: 22px; color: var(--muted); text-align: center; font-size: 0.8r
 
 @media (max-width: 760px) {
   .site-header, .section-heading, .actions, .results-heading { align-items: flex-start; flex-direction: column; }
-  .health-status { align-self: flex-start; }
   .summary-grid { grid-template-columns: repeat(2, 1fr); }
   .exchange-grid { grid-template-columns: 1fr; }
   .detail-row { grid-template-columns: 1fr; gap: 2px; }
