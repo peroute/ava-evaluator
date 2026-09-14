@@ -82,7 +82,7 @@ python -m ava_eval ingest
 python -m ava_eval index-kb
 python -m ava_eval evaluate
 python -m ava_eval report
-python -m ava_eval serve       # http://127.0.0.1:8000  (interactive docs at /docs)
+python -m ava_eval serve       # http://127.0.0.1:8000  (dashboard at /ui, API docs at /docs)
 ```
 
 Both run the whole pipeline with **no API key and no network calls** (`AVA_STUB_LLM=1`,
@@ -98,7 +98,7 @@ verdict.** Every command prints its mode. See [stub vs live](docs/overview.md#st
 | `index-kb --kb-dir DIR [--force]` | 2 | When TTU edits a knowledge base document |
 | `evaluate [--session ID]` | 3–6 | To produce verdicts |
 | `report [--session ID]` | 7 | To read the results |
-| `serve [--port N]` | — | To let the frontend query results |
+| `serve [--port N]` | — | To browse results in the dashboard (`/ui`) or query the API |
 
 They are separate commands because every stage's output is saved to the
 database. You can re-run step 6 after changing the judge prompt without

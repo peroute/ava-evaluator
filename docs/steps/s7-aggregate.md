@@ -60,6 +60,18 @@ recompute from the underlying rows every time you read them. This module only re
 
 Interactive docs at `http://127.0.0.1:8000/docs`.
 
+### The dashboard (read-only)
+
+`http://127.0.0.1:8000/ui/` (and `/`, which redirects there) serves a small dashboard from the same app: plain
+HTML/CSS/JS in [`ava_eval/api/static/`](../../ava_eval/api/static/), no build step, no extra container. It only calls
+`GET /health`, `GET /conversations` and `GET /conversations/{id}`:
+
+- **Conversations:** status (with the rejection note), source file, ingest time, turn and verdict counts, and a banner
+  when `/health` reports stub mode.
+- **Conversation detail:** summary, every turn with its Step 3 state, and the conversation's claims with verdict, tag
+  and evidence. Step 3 state comes from `turn_verdict` first, because `contains_claims` is also `false` for turns
+  that were never classified: `UNCLASSIFIED` → *Not classified*, `NOT_EVALUATED` → *Filler / no checkable claim*.
+
 ## Why it's built this way
 
 - **Views, not summary tables.** A stored summary goes stale when a claim is re-judged. A view recomputes on every
