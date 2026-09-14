@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ava Evaluator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/">Ava Evaluator</a>
+    <span class="subtitle">Read-only results</span>
+  </header>
+
+  <!-- Filled from GET /health when the pipeline ran on stubbed models. -->
+  <div id="stub-banner" class="banner banner-warning" role="status" hidden></div>
+
+  <main id="view" aria-live="polite"></main>
+
+  <script src="app.js"></script>
+</body>
+</html>

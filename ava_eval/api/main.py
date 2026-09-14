@@ -10,17 +10,26 @@ has gone wrong here.
 
 Every endpoint is a read. Nothing in this API can change a verdict — evaluation
 happens through the CLI, and results are evidence, not an editable document.
+
+A minimal read-only dashboard (plain HTML/JS in ``api/static``) is served at
+``/ui`` from this same app, so it needs no build step and no extra container.
+It only calls the GET endpoints below.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..config import settings
 from ..db import store
+
+STATIC_DIR = Path(__file__).with_name("static")
 
 app = FastAPI(
     title="Ava Evaluator",
@@ -133,3 +142,14 @@ def get_claim(claim_id: str) -> dict[str, Any]:
                 "attempt_2": store.get_retrievals(conn, claim_id, attempt=2),
             },
         }
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    """Send a browser opening the bare API address to the dashboard."""
+    return RedirectResponse(url="/ui/")
+
+
+# Mounted last so it can never shadow an API route. StaticFiles only answers
+# GET and HEAD, so the dashboard adds no way to write anything.
+app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
