@@ -41,14 +41,13 @@ return generate_structured(prompt, TurnClassification)
 raises if one is missing or left unfilled. [`generate_structured`](../../ava_eval/llm/client.py#L191) makes Gemini
 answer in exactly the `TurnClassification` JSON shape (structured output), at temperature 0 with retries on failed calls, and
 validates the reply before returning it. A reply that fails validation is not retried: it raises `LlmError`, and the
-pipeline marks that conversation as errored. `contains_claims` is parsed strictly, so only a JSON `true`/`false`
-is accepted — a string such as `"yes"` fails validation instead of being quietly turned into a bool.
+pipeline marks that conversation as errored.
 
 ## Stub vs live
 
 | `AVA_STUB_LLM=1` (default) | `AVA_STUB_LLM=0` |
 |---|---|
-| `_classify_stub`: splits into sentences, drops ones that match filler patterns ("hi", "thanks", "let me…"), and says `true` if what's left contains fact-like words (GPA, credit, deadline, a digit…). | `_classify_live`: fills the prompt with this one turn and calls `generate_structured`. |
+| `_classify_stub`: splits into sentences, drops ones that match filler patterns ("hi", "thanks", "let me…"), and says `true` if what's left contains fact-like words (GPA, credit, deadline, a digit…). | `classify_turns` sends every turn in one `classify_turns_batch` call; any turn the reply misses falls back to `_classify_live`, one call for that turn. |
 
 The stub is deliberately the approach the design *rejected*. "Feel free to call back any time" and "You can defer
 enrollment for one term" have the same shape, and only one is a fact. No keyword list reliably separates them.
@@ -60,8 +59,8 @@ The stub only needs to produce varied, repeatable output so the rest of the pipe
   `true`. Step 4 can drop a false positive (it returns an empty claim list), but it never even sees a turn this step rejected.
 - **Presence, not correctness.** A wrong fact ("the minimum GPA is 9.5") or a hedged one ("I believe the deadline is
   March 1") is still `true`. Whether it is right is step 6's question; this step never looks at the KB.
-- **No conversation history is sent.** Whether a sentence is a greeting doesn't depend on earlier turns, so history
-  would cost tokens and buy nothing. Step 4 is the step that needs history.
+- **One call per conversation.** The prompt template is sent once instead of once per turn. The model sees every turn
+  but judges each reply on its own, using earlier turns only to read short replies like "yes, it does".
 - **Runs on `judge_model` for now.** It's the highest-volume call in the pipeline, so it should get a cheaper model,
   but `generate_structured` has no per-step model override yet.
 
@@ -76,8 +75,7 @@ The stub only needs to produce varied, repeatable output so the rest of the pipe
 
 [`tests/test_classify.py`](../../tests/test_classify.py) covers: the stub's answers (greeting / closing / clarifying
 question → `false`; fact, fact + filler, wrong fact, hedged fact → `true`); the live path with a fake
-`generate_structured` (each prompt carries only its own turn, the model's answer is returned as-is); strict boolean
-parsing; step 4 extracting nothing from a `false` turn; and, through `pipeline.evaluate` on the Postgres test
+`generate_structured` (each prompt carries only its own turn, the model's answer is returned as-is); step 4 extracting nothing from a `false` turn; and, through `pipeline.evaluate` on the Postgres test
 database, that classifications are stored as booleans, `false` turns stay stored, only `true` turns get claims, and
 re-classifying overwrites. How the real model answers those cases is not tested offline. The rollup tests in
 [`tests/test_retrieve_and_rollup.py`](../../tests/test_retrieve_and_rollup.py) check how classifications surface

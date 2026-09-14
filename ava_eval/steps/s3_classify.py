@@ -7,7 +7,7 @@ import re
 from ..config import settings
 from ..llm import load_prompt
 from ..llm.client import generate_structured
-from ..models import ClassifiedTurn, Turn, TurnClassification
+from ..models import BatchClassification, ClassifiedTurn, Turn, TurnClassification
 
 # Stub only: openers that make a sentence conversational filler.
 _FILLER_PATTERNS = [
@@ -62,6 +62,32 @@ def _classify_live(turn: Turn) -> TurnClassification:
     return generate_structured(prompt, TurnClassification)
 
 
+def _render_turns(turns: list[Turn]) -> str:
+    """One labelled block per turn, for the batched prompt."""
+    return "\n\n".join(
+        f"[pair {turn.pair_index}]\ncaller: {turn.caller_asked}\nagent: {turn.agent_said}"
+        for turn in turns
+    )
+
+
+def _classify_batch_live(turns: list[Turn]) -> dict[int, TurnClassification]:
+    """Classify every turn in one Gemini call.
+
+    Answers for pair indices that were not sent are dropped; if an index repeats, the first wins.
+    """
+    prompt = load_prompt("classify_turns_batch", turns=_render_turns(turns))
+    response = generate_structured(prompt, BatchClassification)
+
+    sent = {turn.pair_index for turn in turns}
+    answers: dict[int, TurnClassification] = {}
+    for item in response.turns:
+        if item.pair_index in sent and item.pair_index not in answers:
+            answers[item.pair_index] = TurnClassification(
+                contains_claims=item.contains_claims, reason=item.reason
+            )
+    return answers
+
+
 def classify_turn(turn: Turn) -> TurnClassification:
     """Classify one turn, using the stub or the live call depending on config."""
     if settings.stub_llm:
@@ -70,16 +96,38 @@ def classify_turn(turn: Turn) -> TurnClassification:
 
 
 def classify_turns(turns: list[Turn]) -> list[ClassifiedTurn]:
-    """Classify a batch of turns, preserving order."""
-    results: list[ClassifiedTurn] = []
-    for turn in turns:
-        outcome = classify_turn(turn)
-        results.append(
-            ClassifiedTurn(
-                session_id=turn.session_id,
-                pair_index=turn.pair_index,
-                contains_claims=outcome.contains_claims,
-                reason=outcome.reason,
+    """Classify a conversation's turns, preserving order.
+
+    Live mode asks about all turns in one call, then asks per turn for any the batch missed.
+    """
+    if not turns:
+        return []
+
+    if settings.stub_llm:
+        results: list[ClassifiedTurn] = []
+        for turn in turns:
+            outcome = classify_turn(turn)
+            results.append(
+                ClassifiedTurn(
+                    session_id=turn.session_id,
+                    pair_index=turn.pair_index,
+                    contains_claims=outcome.contains_claims,
+                    reason=outcome.reason,
+                )
             )
+        return results
+
+    answers = _classify_batch_live(turns)
+    for turn in turns:
+        if turn.pair_index not in answers:
+            answers[turn.pair_index] = _classify_live(turn)
+
+    return [
+        ClassifiedTurn(
+            session_id=turn.session_id,
+            pair_index=turn.pair_index,
+            contains_claims=answers[turn.pair_index].contains_claims,
+            reason=answers[turn.pair_index].reason,
         )
-    return results
+        for turn in turns
+    ]

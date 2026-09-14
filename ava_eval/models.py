@@ -124,15 +124,32 @@ class KbChunk(BaseModel):
 class TurnClassification(BaseModel):
     """Gemini's answer to 'does this turn contain anything checkable?'."""
 
-    # strict: a reply like "yes" or 1 fails validation instead of being coerced to a bool.
     contains_claims: bool = Field(
-        strict=True,
         description=(
             "True if ANY part of the agent's reply states a checkable fact about "
             "TTU, even if the rest of the reply is filler or a follow-up question."
         ),
     )
     reason: str = Field(description="One short sentence justifying the decision.")
+
+
+class BatchTurnClassification(BaseModel):
+    """One turn's answer inside a batched classification."""
+
+    pair_index: int = Field(description="The turn's pair_index, copied exactly from its label.")
+    contains_claims: bool = Field(
+        description=(
+            "True if ANY part of the agent's reply states a checkable fact about "
+            "TTU, even if the rest of the reply is filler or a follow-up question."
+        ),
+    )
+    reason: str = Field(description="One short sentence justifying the decision.")
+
+
+class BatchClassification(BaseModel):
+    """Gemini's answer for every turn of a conversation, in one call."""
+
+    turns: list[BatchTurnClassification]
 
 
 class ClassifiedTurn(BaseModel):
