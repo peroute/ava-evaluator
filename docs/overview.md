@@ -131,15 +131,16 @@ erDiagram
 | `conversations` | step 1 | `session_id`, `status` (accepted/rejected), `note` |
 | `turns` | step 1 | `(session_id, pair_index)`, `caller_asked`, `agent_said` |
 | `kb_documents` | step 2 | `doc_id`, `content_hash`, `doc_version_date` |
-| `kb_chunks` | step 2 | `chunk_id`, `section`, `text`, `embedding vector` (unit length, **no index**) |
+| `kb_chunks` | step 2 | `chunk_id` (`t{topic}.q{n}` / `t{topic}.r{n}`), `section` (`Group > Topic > Label`), `kind` (`qa`/`reference`), `text`, `embedding vector` (unit length, **no index**) |
 | `turn_classifications` | step 3 | `contains_claims`, `reason` |
 | `claims` | step 4 | `claim_id` (`{session}__p{pair}__c{n}`), `subject_tag`, `claim_text`, `scope_derived_from` JSONB |
 | `claim_retrievals` | step 5 (+6 retry) | `(claim_id, chunk_id, attempt)`, `rank`, `score` |
-| `verdicts` | step 6 | `verdict`, `tag`, `rationale`, `evidence_chunk_id`, `attempts` |
+| `verdicts` | step 6 | `verdict`, `tag`, `rationale`, `evidence_chunk_id`, `attempts`, `kb_content_hash` (KB version it was judged against) |
 | `v_claim_results` · `v_turn_results` · `v_conversation_summary` | step 7 (views) | computed on every read, never stored |
 
-Schema source: [`0001_initial_schema.py`](../ava_eval/db/migrations/versions/0001_initial_schema.py). `CHECK` constraints
-mirror the enums in `models.py`, so a mistyped verdict is rejected by the database.
+Schema source: [`0001_initial_schema.py`](../ava_eval/db/migrations/versions/0001_initial_schema.py), plus
+[`0003_kb_structure.py`](../ava_eval/db/migrations/versions/0003_kb_structure.py) for chunk kinds and the
+stale-verdict flag. `CHECK` constraints mirror the enums in `models.py`, so a mistyped verdict is rejected by the database.
 
 ### Storage and runtime
 
@@ -191,7 +192,8 @@ first. That means the most frequent, most error-prone topics, rather than the wh
 | **Claim** | One checkable fact pulled from an answer, rewritten to make sense on its own. |
 | **Self-contained** | The claim names its own scope ("For the Online BBA, …"), so it can be checked without the conversation. |
 | **`subject_tag`** | What a turn is about, e.g. `Online BBA - General Business`. Set per turn in step 4. |
-| **Chunk** | A section-sized piece of a KB document, the unit that gets searched and cited. |
+| **Chunk** | The unit that gets searched and cited: one question with its answer, or a few small descriptive sections of one program packed together. Always starts with its `Group > Topic` header. |
+| **Topic** | One "If asked questions about X, answer with" block of the KB document: a program page or a themed FAQ. |
 | **Embedding** | A list of numbers representing a text's meaning. Similar meanings point in similar directions. |
 | **Cosine similarity** | How closely two embeddings point the same way (1 = identical direction). For unit-length vectors it equals the inner product. |
 | **pgvector** | PostgreSQL extension adding a `vector` column type and distance operators like `<#>`. |

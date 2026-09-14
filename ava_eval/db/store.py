@@ -227,12 +227,18 @@ def list_sessions(
 # ---------------------------------------------------------------------------
 
 
-def get_document_hash(conn: Connection, doc_id: str) -> str | None:
-    """Return the stored content hash for a document, or None if never indexed."""
+def current_kb_hash(conn: Connection) -> str | None:
+    """Fingerprint of the knowledge base as currently indexed, or None if empty.
+
+    With one document this is just its content hash. It is stamped on every
+    verdict so a report can tell when a verdict was judged against an older KB.
+    The same expression lives in the ``v_claim_results`` view (migration 0003);
+    change both together.
+    """
     row = conn.execute(
-        "SELECT content_hash FROM kb_documents WHERE doc_id = %s", (doc_id,)
+        "SELECT string_agg(content_hash, ',' ORDER BY doc_id) AS kb_hash FROM kb_documents"
     ).fetchone()
-    return row["content_hash"] if row else None
+    return row["kb_hash"] if row else None
 
 
 def upsert_document(
@@ -260,9 +266,15 @@ def upsert_document(
     )
 
 
-def delete_chunks_for_doc(conn: Connection, doc_id: str) -> None:
-    """Drop a document's chunks ahead of re-indexing it."""
-    conn.execute("DELETE FROM kb_chunks WHERE doc_id = %s", (doc_id,))
+def clear_kb(conn: Connection) -> None:
+    """Remove every indexed document and, by cascade, every chunk.
+
+    The knowledge base is one document and re-indexing replaces it whole, so a
+    renamed or replaced file can never leave its old chunks searchable. Retrieval
+    history and verdicts keep their chunk ids (there is no foreign key); they
+    simply stop joining to evidence text that no longer exists.
+    """
+    conn.execute("DELETE FROM kb_documents")
 
 
 def insert_chunks(
@@ -281,6 +293,7 @@ def insert_chunks(
             chunk.section,
             chunk.ordinal,
             chunk.text,
+            chunk.kind.value,
             normalise(vector),
             len(vector),
             embedding_model,
@@ -291,14 +304,15 @@ def insert_chunks(
         cur.executemany(
             """
             INSERT INTO kb_chunks
-                (chunk_id, doc_id, section, ordinal, text,
+                (chunk_id, doc_id, section, ordinal, text, kind,
                  embedding, embedding_dim, embedding_model)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (chunk_id) DO UPDATE SET
                 doc_id          = excluded.doc_id,
                 section         = excluded.section,
                 ordinal         = excluded.ordinal,
                 text            = excluded.text,
+                kind            = excluded.kind,
                 embedding       = excluded.embedding,
                 embedding_dim   = excluded.embedding_dim,
                 embedding_model = excluded.embedding_model
@@ -562,14 +576,16 @@ def save_verdict(conn: Connection, verdict: ClaimVerdict) -> None:
     conn.execute(
         """
         INSERT INTO verdicts
-            (claim_id, verdict, tag, rationale, evidence_chunk_id, attempts, judged_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (claim_id, verdict, tag, rationale, evidence_chunk_id, attempts,
+             kb_content_hash, judged_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (claim_id) DO UPDATE SET
             verdict           = excluded.verdict,
             tag               = excluded.tag,
             rationale         = excluded.rationale,
             evidence_chunk_id = excluded.evidence_chunk_id,
             attempts          = excluded.attempts,
+            kb_content_hash   = excluded.kb_content_hash,
             judged_at         = excluded.judged_at
         """,
         (
@@ -579,6 +595,7 @@ def save_verdict(conn: Connection, verdict: ClaimVerdict) -> None:
             verdict.rationale,
             verdict.evidence_chunk_id or None,
             verdict.attempts,
+            verdict.kb_content_hash,
             utcnow(),
         ),
     )

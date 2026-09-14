@@ -35,8 +35,9 @@ Copy [`.env.example`](../.env.example) to `.env` to start.
 | `AVA_TOP_K` | `5` | step 5 | Chunks per claim |
 | `AVA_RETRY_K_MULTIPLIER` | `3` | step 6 | Retry searches `TOP_K × this` |
 | `AVA_MAX_WORKERS` | `4` | steps 5, 6 | Thread pool size for embed/judge calls |
-| `AVA_CHUNK_TARGET_CHARS` | `1200` | step 2 | Soft ceiling on chunk size |
-| `AVA_CHUNK_OVERLAP_RATIO` | `0.15` | step 2 | Share of the target carried into the next chunk |
+| `AVA_KB_FILE` | `sample_data/kb/sample_online.docx` | step 2 | The knowledge base `.docx`. Set to `realdata/online.docx` for real runs |
+| `AVA_CHUNK_TARGET_CHARS` | `1200` | step 2 | Soft ceiling on a chunk's body; reference sections are packed up to it |
+| `AVA_CHUNK_OVERLAP_RATIO` | `0.15` | step 2 | Share of the target carried between the parts of one oversized section (never across sections) |
 | `POSTGRES_USER` / `_PASSWORD` / `_DB` | `ava` / `ava` / `ava_eval` | compose | Used when the volume is first created |
 | `AVA_DB_PORT` | `5433` | compose | Host port for the database |
 
@@ -171,7 +172,9 @@ python -m pytest
 | File | Covers |
 |---|---|
 | [`test_ingest.py`](../tests/test_ingest.py) | transcript validation, batch resilience, re-ingest |
-| [`test_kb.py`](../tests/test_kb.py) | table extraction, heading paths, chunk boundaries and overlap, hashing |
+| [`test_kb.py`](../tests/test_kb.py) | bold/list/table extraction, topic markers, scaffold and TOC handling, label ownership and parents, catalog groups, chunk packing, ids, content survival, hashing |
+| [`test_kb_realdata.py`](../tests/test_kb_realdata.py) | the same properties on `realdata/online.docx` (skipped when the file is absent): topic count, no cross-topic chunks, pasted program pages, nothing lost |
+| [`test_kb_versioning.py`](../tests/test_kb_versioning.py) | chunk kind column, KB replacement, verdicts recording the KB version, the stale-verdict flag and report warning, migration 0003 round trip |
 | [`test_retrieve_and_rollup.py`](../tests/test_retrieve_and_rollup.py) | pgvector search vs brute force, normalisation, severity rollup, cascades, constraints |
 | [`test_judge_policy.py`](../tests/test_judge_policy.py) | the `NOT_FOUND`-only retry and tagging, prompt loading, dimension-mismatch errors |
 | [`test_timezone.py`](../tests/test_timezone.py) | display zone for app and other clients, stored instants unchanged |
@@ -181,7 +184,8 @@ python -m pytest
 ## Going live
 
 1. Put `GEMINI_API_KEY` in `.env`.
-2. `AVA_STUB_EMBED=0`, then `python -m ava_eval index-kb --force` (the stored vectors must be rebuilt with the real model).
+2. `AVA_KB_FILE=realdata/online.docx` and `AVA_STUB_EMBED=0`, then `python -m ava_eval index-kb --force` (the stored
+   vectors must be rebuilt with the real model). Indexing makes one embedding call per chunk, about 320 for the real document.
 3. `AVA_STUB_LLM=0`, then implement `_classify_live`, `_decompose_live`, `_judge_live` **one at a time**, running
    `evaluate` after each. Because every stage is saved, a failed attempt only costs you that step.
 4. Check `GET /health` reports `stub_llm: false, stub_embed: false` before showing results to anyone.

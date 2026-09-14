@@ -69,22 +69,40 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 def cmd_index_kb(args: argparse.Namespace) -> int:
     """Step 2: extract, chunk and embed the knowledge base."""
     print(f"Indexing mode: {_mode_banner()}")
-    report = index_knowledge_base(Path(args.kb_dir), force=args.force)
-
-    print(f"\nIndexed {len(report.indexed)} documents ({report.chunk_count} chunks)")
-    for name, count in report.indexed:
-        print(f"  + {name:<44} {count:>4} chunks")
+    report = index_knowledge_base(Path(args.kb_file), force=args.force)
 
     if report.skipped:
-        print(f"\nSkipped {len(report.skipped)} unchanged documents")
-        for name in report.skipped:
-            print(f"  = {name}")
+        print(
+            f"\nSkipped {report.source_doc}: content unchanged since it was last indexed "
+            f"(use --force to re-index)"
+        )
+        return 0
 
-    if report.failed:
-        print(f"\nFailed {len(report.failed)} documents")
-        for name, reason in report.failed:
-            print(f"  ! {name}: {reason}")
-        return 1
+    print(
+        f"\nIndexed {report.source_doc}: {report.chunk_count} chunks "
+        f"({report.qa_chunks} question, {report.reference_chunks} reference)"
+    )
+    print(
+        f"  {report.topic_count} topics, "
+        f"{report.grouped_topic_count} placed under a catalog group"
+    )
+
+    if report.unmarked_topics:
+        # Indexed correctly, but worth telling TTU: these pages sit under another
+        # program's topic with no "If asked questions about" line of their own.
+        print(f"\nProgram pages found without a topic marker ({len(report.unmarked_topics)})")
+        for name in report.unmarked_topics:
+            print(f"  ~ {name}")
+
+    if report.unmatched_catalog_entries:
+        # Not an error: TTU lists a program but gives it no page. Claims about
+        # its details can only come back NOT_FOUND, and that is a real KB gap.
+        print(
+            f"\nListed in a catalog but no topic in the KB "
+            f"({len(report.unmatched_catalog_entries)})"
+        )
+        for catalog, entry in report.unmatched_catalog_entries:
+            print(f"  ? {entry}  (listed in: {catalog})")
 
     return 0
 
@@ -148,9 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     index = subparsers.add_parser("index-kb", help="step 2: index the knowledge base")
     index.add_argument(
-        "--kb-dir",
-        default=str(PROJECT_ROOT / "sample_data" / "kb"),
-        help="directory of .docx knowledge base documents",
+        "--kb-file",
+        default=str(settings.kb_file),
+        help="the .docx knowledge base (default: AVA_KB_FILE, else the generated sample KB)",
     )
     index.add_argument("--force", action="store_true", help="re-index even unchanged documents")
     index.set_defaults(func=cmd_index_kb)

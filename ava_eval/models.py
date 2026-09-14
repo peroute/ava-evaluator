@@ -98,22 +98,64 @@ class RejectedConversation(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class KbBlock(BaseModel):
-    """One paragraph (or flattened table row) lifted out of a .docx."""
+class ChunkKind(str, Enum):
+    """Whether a chunk is one question with its answer, or descriptive content.
+
+    Retrieval treats both the same. The kind decides how a section is chunked
+    (questions stand alone, reference content is packed) and lets reports say
+    where flags come from.
+    """
+
+    QA = "qa"
+    REFERENCE = "reference"
+
+
+class KbParagraph(BaseModel):
+    """One paragraph (or flattened table row) lifted out of a .docx.
+
+    ``bold`` and ``is_list`` are kept because the knowledge base has no heading
+    styles: its topics and labels are recognised by formatting.
+    """
 
     text: str
-    heading_path: list[str]
+    bold: bool
+    is_list: bool
     ordinal: int
 
 
+class KbSection(BaseModel):
+    """One labelled block inside a knowledge base topic, before chunking.
+
+    ``label_path`` is the bold label(s) the block sits under, e.g.
+    ``["Application Deadlines", "Late Fall"]``, or ``["Overview"]`` for text that
+    comes before any label. ``group`` is the catalog topic that lists this topic
+    ("Master's Degrees"), or empty.
+    """
+
+    topic_no: int
+    group: str
+    topic: str
+    label_path: list[str]
+    kind: ChunkKind
+    lines: list[str]
+
+
 class KbChunk(BaseModel):
-    """A retrievable unit of the knowledge base, before embedding."""
+    """A retrievable unit of the knowledge base, before embedding.
+
+    ``section`` is the chunk's ``Group > Topic > Label`` header: the embedding
+    title, and the citation the judge and TTU staff see.
+    """
 
     chunk_id: str
     doc_id: str
     section: str
     ordinal: int
     text: str
+    kind: ChunkKind = ChunkKind.REFERENCE
+    topic_no: int = 0
+    group: str = ""
+    topic: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -270,3 +312,4 @@ class ClaimVerdict(BaseModel):
     rationale: str = ""
     evidence_chunk_id: str | None = None
     attempts: int = 1
+    kb_content_hash: str | None = None
