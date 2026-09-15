@@ -1,14 +1,27 @@
-"""Group extracted blocks into retrievable chunks.
+"""Turn the knowledge base's labelled sections into retrievable chunks.
 
-Chunking is semantic rather than fixed-width: chunks follow the document's own
-section boundaries and only ever split between paragraphs. The reason is the
-same scoping problem the claim decomposition step deals with — a fixed 500-token
-window will happily cut between "minimum GPA of 2.0" and "for the Online BBA",
-leaving two chunks that are each individually misleading.
+Boundaries come from the document's own structure (``structure.py``), never a
+fixed-width window. A fixed window cuts between "minimum GPA of 2.0" and "for
+the Online BBA", or glues the end of one program's page onto the start of the
+next, leaving chunks that are each individually misleading.
 
-Overlap exists for the same reason at the seam: a fact stated across the last
-sentence of one chunk and the first of the next would otherwise belong to
-neither, so each chunk carries the tail of its predecessor.
+The two kinds of section are treated differently:
+
+* A **question and its answer** is exactly one chunk. The judge's citation then
+  points at one answer, and no unrelated answer rides along into its prompt.
+* **Reference content** (a program's overview, prerequisites, deadlines) is
+  labelled for layout rather than meaning, so its small pieces are packed
+  together within one topic, up to the size target. A 71-character "Late Fall"
+  deadline would otherwise spend a whole retrieval slot on its own.
+
+Every chunk begins with its ``Group > Topic`` header. That line tells the
+embedder and the judge which program a passage belongs to. Dozens of program
+pages carry word-for-word identical deadline text, and without the header those
+chunks are indistinguishable.
+
+Overlap exists only between the pieces of one oversized section. Carrying text
+across two separate answers would put one question's tail inside another
+question's chunk.
 """
 
 from __future__ import annotations
@@ -16,7 +29,7 @@ from __future__ import annotations
 import re
 from itertools import groupby
 
-from ..models import KbBlock, KbChunk
+from ..models import ChunkKind, KbChunk, KbSection
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
@@ -28,13 +41,17 @@ def slugify(text: str, max_length: int = 40) -> str:
     return slug[:max_length].strip("_") or "untitled"
 
 
+def topic_header(section: KbSection) -> str:
+    """The ``Group > Topic`` line every chunk of this section's topic starts with."""
+    return f"{section.group} > {section.topic}" if section.group else section.topic
+
+
 def _split_long_block(text: str, limit: int) -> list[str]:
-    """Fallback for a single paragraph bigger than a whole chunk.
+    """Fallback for a single line bigger than a whole chunk.
 
     Splitting mid-paragraph is the thing this module exists to avoid, so this
-    only runs when a paragraph is oversized on its own and there is no
-    structural boundary left to use. Sentence boundaries are the least-bad
-    remaining option.
+    only runs when one line is oversized on its own and there is no structural
+    boundary left to use. Sentence boundaries are the least-bad remaining option.
     """
     sentences = _SENTENCE_RE.split(text)
     pieces: list[str] = []
@@ -52,7 +69,7 @@ def _split_long_block(text: str, limit: int) -> list[str]:
 
 
 def _overlap_tail(texts: list[str], budget: int) -> list[str]:
-    """Take whole trailing paragraphs from a chunk, up to a character budget."""
+    """Take whole trailing lines from a piece, up to a character budget."""
     tail: list[str] = []
     used = 0
     for text in reversed(texts):
@@ -65,76 +82,121 @@ def _overlap_tail(texts: list[str], budget: int) -> list[str]:
     return tail
 
 
-def chunk_blocks(
-    blocks: list[KbBlock],
+def _section_pieces(section: KbSection, target_chars: int, overlap_budget: int) -> list[str]:
+    """Render a section as one body, or as several parts if it exceeds the target.
+
+    Each body starts with the section's label path, so a part of a long Overview
+    still says what it is part of.
+    """
+    label = " > ".join(section.label_path)
+    whole = "\n".join([label, *section.lines])
+    if len(whole) <= target_chars:
+        return [whole]
+
+    lines: list[str] = []
+    for line in section.lines:
+        lines.extend(_split_long_block(line, target_chars) if len(line) > target_chars else [line])
+
+    pieces: list[list[str]] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        if current and current_len + len(line) > target_chars:
+            pieces.append(current)
+            current = _overlap_tail(current, overlap_budget) if overlap_budget > 0 else []
+            current_len = sum(len(item) for item in current)
+            if current_len + len(line) > target_chars:
+                # The carried tail plus this line would already overflow, and a
+                # piece that is nothing but repeated overlap tells no one anything.
+                current, current_len = [], 0
+        current.append(line)
+        current_len += len(line)
+    if current:
+        pieces.append(current)
+
+    total = len(pieces)
+    return [
+        "\n".join([f"{label} (part {number}/{total})", *piece])
+        for number, piece in enumerate(pieces, start=1)
+    ]
+
+
+def chunk_sections(
+    sections: list[KbSection],
     doc_id: str,
     target_chars: int = 1200,
     overlap_ratio: float = 0.15,
 ) -> list[KbChunk]:
-    """Group blocks into chunks, respecting section boundaries.
+    """Group labelled sections into chunks.
 
     Args:
-        blocks: Extracted blocks in document order.
-        doc_id: Slug identifying the source document, used to build chunk ids.
-        target_chars: Soft ceiling on chunk size. Chunks close rather than
-            exceed it, except where a single paragraph is already larger.
-        overlap_ratio: Fraction of ``target_chars`` carried over from the
-            previous chunk, as whole paragraphs.
+        sections: Output of ``parse_structure``, in document order.
+        doc_id: The source document's id, stored on every chunk.
+        target_chars: Soft ceiling on a chunk's body. Reference packs close
+            before exceeding it; a larger section is split into parts.
+        overlap_ratio: Fraction of ``target_chars`` carried between the parts of
+            one oversized section. Never applied across sections.
 
     Returns:
-        Chunks with stable, human-readable ids of the form
-        ``{doc_id}__{section_slug}__{ordinal:03d}``.
+        Chunks with short positional ids: ``t{topic:02d}.q{n:02d}`` for a question
+        and ``t{topic:02d}.r{n:02d}`` for reference content, numbered from 1 within
+        each topic. Short ids are easy for the judge to copy back exactly.
     """
-    if not blocks:
-        return []
-
     overlap_budget = int(target_chars * overlap_ratio)
     chunks: list[KbChunk] = []
-    ordinal = 0
 
-    # Consecutive blocks sharing a heading path form one section. Chunks never
-    # straddle two sections, so a chunk always has one honest citation.
-    for heading_path, group in groupby(blocks, key=lambda b: tuple(b.heading_path)):
-        section = " > ".join(heading_path) if heading_path else "(no section)"
-        section_slug = slugify(section)
+    for topic_no, topic_iter in groupby(sections, key=lambda section: section.topic_no):
+        topic_sections = list(topic_iter)
+        first = topic_sections[0]
+        header = topic_header(first)
+        counters = {ChunkKind.QA: 0, ChunkKind.REFERENCE: 0}
+        pack_labels: list[str] = []
+        pack_bodies: list[str] = []
+        pack_len = 0
 
-        pieces: list[str] = []
-        for block in group:
-            if len(block.text) > target_chars:
-                pieces.extend(_split_long_block(block.text, target_chars))
-            else:
-                pieces.append(block.text)
-
-        current: list[str] = []
-        current_len = 0
-
-        def flush() -> list[str]:
-            """Emit the accumulated paragraphs as a chunk, return its overlap tail."""
-            nonlocal ordinal
-            if not current:
-                return []
+        def emit(kind: ChunkKind, labels: list[str], bodies: list[str]) -> None:
+            """Append one chunk for this topic."""
+            counters[kind] += 1
+            letter = "q" if kind is ChunkKind.QA else "r"
             chunks.append(
                 KbChunk(
-                    chunk_id=f"{doc_id}__{section_slug}__{ordinal:03d}",
+                    chunk_id=f"t{topic_no:02d}.{letter}{counters[kind]:02d}",
                     doc_id=doc_id,
-                    section=section,
-                    ordinal=ordinal,
-                    text="\n\n".join(current),
+                    section=f"{header} > {'; '.join(labels)}",
+                    ordinal=len(chunks),
+                    text="\n\n".join([header, *bodies]),
+                    kind=kind,
+                    topic_no=topic_no,
+                    group=first.group,
+                    topic=first.topic,
                 )
             )
-            ordinal += 1
-            return _overlap_tail(current, overlap_budget) if overlap_budget > 0 else []
 
-        for piece in pieces:
-            if current and current_len + len(piece) > target_chars:
-                carry = flush()
-                current = list(carry)
-                current_len = sum(len(item) for item in current)
-            current.append(piece)
-            current_len += len(piece)
+        def flush_pack() -> None:
+            """Emit the packed reference sections, if any, as one chunk."""
+            nonlocal pack_labels, pack_bodies, pack_len
+            if pack_bodies:
+                emit(ChunkKind.REFERENCE, pack_labels, pack_bodies)
+            pack_labels, pack_bodies, pack_len = [], [], 0
 
-        flush()
-        current = []
-        current_len = 0
+        for section in topic_sections:
+            pieces = _section_pieces(section, target_chars, overlap_budget)
+
+            if section.kind is ChunkKind.QA or len(pieces) > 1:
+                # Questions and oversized sections stand alone. Flushing first
+                # keeps chunk order identical to document order.
+                flush_pack()
+                for piece in pieces:
+                    emit(section.kind, [piece.split("\n", 1)[0]], [piece])
+                continue
+
+            body = pieces[0]
+            if pack_bodies and pack_len + len(body) > target_chars:
+                flush_pack()
+            pack_labels.append(" > ".join(section.label_path))
+            pack_bodies.append(body)
+            pack_len += len(body)
+
+        flush_pack()
 
     return chunks

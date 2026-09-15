@@ -18,22 +18,24 @@ The retry rule is the part with teeth, and it is asymmetric on purpose:
   chunk somewhere else in the knowledge base, which is precisely how a real
   hallucination gets quietly buried.
 
-IMPLEMENTATION STATUS: the verdict call is stubbed (``_judge_stub`` /
-``_judge_live``). Everything around it — parallelism, the retry pass, tagging —
-is real and is what the stub exists to let you verify.
+A claim whose judge call fails (``LlmError``: quota, bad JSON, or a made-up
+evidence id) is skipped, not fatal: the rest of the conversation's verdicts are
+still saved, and the failed claim stays unjudged so the report can say so. A
+failed *retry* falls back to the first-pass NOT_FOUND, untagged.
 """
 
 from __future__ import annotations
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from typing import Sequence
 
 from ..config import settings
 from ..db import store
 from ..db.store import Connection
 from ..llm import load_prompt
-from ..llm.client import generate_structured
+from ..llm.client import LlmError, generate_structured
 from ..models import Claim, ClaimVerdict, JudgeResponse, RetrievedChunk, Verdict, VerdictTag
 from .s5_retrieve import retrieve_for_claims
 
@@ -81,6 +83,10 @@ def render_excerpts(chunks: Sequence[RetrievedChunk]) -> str:
     Each excerpt carries its ``chunk_id`` because the judge has to name the one
     that decided the verdict. Without that, a flag would be an assertion with no
     way to check it — and checkability is the entire product here.
+
+    ``source`` is the chunk's ``Group > Topic > Label`` header. It is how the
+    judge knows which program an excerpt belongs to; the file name is the same
+    for every chunk and would tell it nothing.
     """
     if not chunks:
         return "(No excerpts were retrieved for this claim.)"
@@ -89,7 +95,7 @@ def render_excerpts(chunks: Sequence[RetrievedChunk]) -> str:
     for chunk in chunks:
         parts.append(
             f"--- chunk_id: {chunk.chunk_id}\n"
-            f"    source: {chunk.source_doc} > {chunk.section}\n"
+            f"    source: {chunk.section}\n"
             f"    similarity: {chunk.score:.3f}\n\n"
             f"{chunk.text}"
         )
@@ -161,39 +167,56 @@ def _judge_stub(claim: Claim, chunks: Sequence[RetrievedChunk]) -> JudgeResponse
     )
 
 
+def _check_evidence(
+    claim: Claim, response: JudgeResponse, chunks: Sequence[RetrievedChunk]
+) -> JudgeResponse:
+    """Reject a verdict whose evidence id cannot be traced to a shown excerpt.
+
+    A made-up id breaks the join to ``kb_chunks`` in ``v_claim_results`` and the
+    flag silently loses its evidence; a SUPPORTED or CONTRADICTED with no id at
+    all is a flag nobody can check. Both fail the claim rather than being saved.
+    NOT_FOUND may cite nothing, or a real chunk it found nearby.
+
+    Raises:
+        LlmError: if the id is unknown, or missing on a non-NOT_FOUND verdict.
+    """
+    allowed = [chunk.chunk_id for chunk in chunks]
+    cited = response.evidence_chunk_id.strip()
+
+    if cited and cited not in allowed:
+        raise LlmError(
+            f"judge cited evidence_chunk_id {cited!r} for claim {claim.claim_id}, "
+            f"which was not among the excerpts shown: {allowed}"
+        )
+    if not cited and response.verdict != Verdict.NOT_FOUND:
+        raise LlmError(
+            f"judge returned {response.verdict.value} for claim {claim.claim_id} "
+            f"without an evidence_chunk_id"
+        )
+    return response.model_copy(update={"evidence_chunk_id": cited})
+
+
 def _judge_live(claim: Claim, chunks: Sequence[RetrievedChunk]) -> JudgeResponse:
     """Ask Gemini for a verdict on one claim against its excerpts.
 
-    TODO(hedi): implement. Roughly::
+    The prompt at ``llm/prompts/judge_claim.md`` carries both rubric rules:
+    excerpts only, no outside knowledge; and general policy satisfies a
+    program-specific claim unless an override appears. The "excerpts only" rule
+    is the one to guard -- without it verdicts become an invisible mix of
+    "grounded in TTU documentation" and "sounded plausible to a model".
 
-        prompt = load_prompt(
-            "judge_claim",
-            subject_tag=claim.subject_tag or "(not specified)",
-            claim_text=claim.text,
-            excerpts=render_excerpts(chunks),
-        )
-        return generate_structured(prompt, JudgeResponse)
-
-    Things worth knowing before you write it:
-
-    * The prompt at ``llm/prompts/judge_claim.md`` already encodes both rubric
-      rules — excerpts only, no outside knowledge; and general policy satisfies
-      a program-specific claim unless an override appears.
-    * The "excerpts only" instruction is the one to guard. A judge that leans on
-      what it already knows about universities produces a silent mix of
-      "grounded in TTU documentation" and "sounded plausible to a language
-      model", and nothing downstream can separate them. If you change one thing
-      in that prompt, do not change that.
-    * Consider verifying that ``evidence_chunk_id`` is actually one of the
-      chunks you passed in. A hallucinated id breaks the join to ``kb_chunks``
-      in ``v_claim_results`` and the flag silently loses its evidence.
-    * Temperature is already 0 in ``generate_structured``. An evaluator that
-      gives different verdicts on identical evidence is not an evaluator.
+    Raises:
+        LlmError: if the call fails, the reply does not match the schema, or the
+            cited evidence id is not one of ``chunks`` (see ``_check_evidence``).
     """
-    raise NotImplementedError(
-        "Step 6 is not implemented yet. Run with AVA_STUB_LLM=1, or implement "
-        "_judge_live in ava_eval/steps/s6_judge.py."
+    prompt = load_prompt(
+        "judge_claim",
+        subject_tag=claim.subject_tag or "(not specified)",
+        claim_text=claim.text,
+        excerpts=render_excerpts(chunks),
     )
+    response = generate_structured(prompt, JudgeResponse)
+    return _check_evidence(claim, response, chunks)
 
 
 def judge_claim(claim: Claim, chunks: Sequence[RetrievedChunk]) -> JudgeResponse:
@@ -204,9 +227,18 @@ def judge_claim(claim: Claim, chunks: Sequence[RetrievedChunk]) -> JudgeResponse
 
 
 def _to_verdict(
-    claim_id: str, response: JudgeResponse, attempts: int, tag: VerdictTag | None
+    claim_id: str,
+    response: JudgeResponse,
+    attempts: int,
+    tag: VerdictTag | None,
+    kb_content_hash: str | None,
 ) -> ClaimVerdict:
-    """Convert a judge response into a persistable verdict."""
+    """Convert a judge response into a persistable verdict.
+
+    ``kb_content_hash`` records which KB version the verdict was judged against.
+    Chunk ids are positional, so after a re-index the same id can name different
+    text; the hash is what lets the report warn about that.
+    """
     return ClaimVerdict(
         claim_id=claim_id,
         verdict=response.verdict,
@@ -214,14 +246,40 @@ def _to_verdict(
         rationale=response.rationale,
         evidence_chunk_id=response.evidence_chunk_id or None,
         attempts=attempts,
+        kb_content_hash=kb_content_hash,
     )
+
+
+@dataclass
+class JudgeBatch:
+    """What judging one batch of claims produced.
+
+    ``failures`` maps claim id to error message for claims that got no verdict.
+    """
+
+    verdicts: list[ClaimVerdict] = field(default_factory=list)
+    failures: dict[str, str] = field(default_factory=dict)
+
+
+def _first_pass_fallback(
+    claim_id: str, response: JudgeResponse, error: Exception, kb_hash: str | None
+) -> ClaimVerdict:
+    """Keep the first-pass NOT_FOUND when the retry could not run.
+
+    Untagged and ``attempts=1``, because the retry that decides kb_gap versus
+    retrieval_miss never happened -- and the rationale says so, for the audit.
+    """
+    noted = response.model_copy(
+        update={"rationale": f"{response.rationale} [retry failed: {error}]"}
+    )
+    return _to_verdict(claim_id, noted, attempts=1, tag=None, kb_content_hash=kb_hash)
 
 
 def judge_claims(
     conn: Connection,
     claims: Sequence[Claim],
     retrievals: dict[str, list[RetrievedChunk]],
-) -> list[ClaimVerdict]:
+) -> JudgeBatch:
     """Judge a batch of claims, applying the NOT_FOUND retry policy.
 
     Args:
@@ -230,13 +288,17 @@ def judge_claims(
         retrievals: First-attempt chunks per claim id, from step 5.
 
     Returns:
-        One verdict per claim, persisted as a side effect.
+        The saved verdicts (persisted as a side effect) and the claims that
+        could not be judged, with their errors.
     """
+    batch = JudgeBatch()
     if not claims:
-        return []
+        return batch
 
     by_id = {claim.claim_id: claim for claim in claims}
     first_pass: dict[str, JudgeResponse] = {}
+    # Read once so every verdict in this batch records the same KB version.
+    kb_hash = store.current_kb_hash(conn)
 
     # Judge calls are independent per claim -- same justification as step 5.
     with ThreadPoolExecutor(max_workers=settings.max_workers) as pool:
@@ -245,50 +307,69 @@ def judge_claims(
             for claim in claims
         }
         for future in as_completed(futures):
-            first_pass[futures[future]] = future.result()
+            claim_id = futures[future]
+            try:
+                first_pass[claim_id] = future.result()
+            except LlmError as exc:
+                # Only LlmError: a TypeError or DB error is a bug, not a flaky call.
+                batch.failures[claim_id] = str(exc)
 
-    verdicts: list[ClaimVerdict] = []
+    verdicts = batch.verdicts
+    judged = [claim for claim in claims if claim.claim_id in first_pass]
     needs_retry = [
-        by_id[claim_id]
-        for claim_id, response in first_pass.items()
-        if response.verdict == Verdict.NOT_FOUND
+        claim for claim in judged if first_pass[claim.claim_id].verdict == Verdict.NOT_FOUND
     ]
 
     # Everything that was not NOT_FOUND is final, including every CONTRADICTED.
-    for claim in claims:
+    for claim in judged:
         response = first_pass[claim.claim_id]
         if response.verdict != Verdict.NOT_FOUND:
-            verdicts.append(_to_verdict(claim.claim_id, response, attempts=1, tag=None))
+            verdicts.append(
+                _to_verdict(claim.claim_id, response, attempts=1, tag=None, kb_content_hash=kb_hash)
+            )
 
     if needs_retry:
         wider_k = settings.top_k * settings.retry_k_multiplier
-        wider = retrieve_for_claims(conn, needs_retry, k=wider_k, attempt=2)
-
-        for claim in needs_retry:
-            original_ids = {c.chunk_id for c in retrievals.get(claim.claim_id, [])}
-            widened = wider.get(claim.claim_id, [])
-            fresh = [c for c in widened if c.chunk_id not in original_ids]
-
-            if not fresh:
-                # The wider net caught nothing new, so the first search was not
-                # the limiting factor. The knowledge base genuinely lacks this.
+        try:
+            wider = retrieve_for_claims(conn, needs_retry, k=wider_k, attempt=2)
+        except LlmError as exc:
+            # The wider search itself failed (embedding call): no retry can run.
+            for claim in needs_retry:
                 verdicts.append(
-                    _to_verdict(claim.claim_id, first_pass[claim.claim_id], 1, VerdictTag.KB_GAP)
+                    _first_pass_fallback(claim.claim_id, first_pass[claim.claim_id], exc, kb_hash)
+                )
+            needs_retry = []
+            wider = {}
+
+        # Every NOT_FOUND gets the second look, unconditionally. Search is exact
+        # and has no score floor, so the wider top-k always contains the first
+        # top-k plus new chunks; a "did we find anything new?" shortcut could
+        # never fire on a real KB. Skipping the retry would also risk blaming
+        # TTU's docs (kb_gap) for what was really our search missing.
+        for claim in needs_retry:
+            try:
+                retry_response = judge_claim(claim, wider.get(claim.claim_id, []))
+            except LlmError as exc:
+                verdicts.append(
+                    _first_pass_fallback(claim.claim_id, first_pass[claim.claim_id], exc, kb_hash)
                 )
                 continue
-
-            retry_response = judge_claim(claim, widened)
             if retry_response.verdict == Verdict.NOT_FOUND:
-                verdicts.append(_to_verdict(claim.claim_id, retry_response, 2, VerdictTag.KB_GAP))
+                # Even with the wider set, nothing covers this claim.
+                verdicts.append(
+                    _to_verdict(claim.claim_id, retry_response, 2, VerdictTag.KB_GAP, kb_hash)
+                )
             else:
                 # The content existed all along; our first search missed it.
                 # That is a fact about our retrieval quality, not about Ava or
                 # about TTU's knowledge base, and it is tagged as such.
                 verdicts.append(
-                    _to_verdict(claim.claim_id, retry_response, 2, VerdictTag.RETRIEVAL_MISS)
+                    _to_verdict(
+                        claim.claim_id, retry_response, 2, VerdictTag.RETRIEVAL_MISS, kb_hash
+                    )
                 )
 
     for verdict in verdicts:
         store.save_verdict(conn, verdict)
 
-    return verdicts
+    return batch

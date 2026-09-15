@@ -1,4 +1,4 @@
-"""Pull clean, structured text out of .docx knowledge base documents.
+"""Pull clean text and formatting signals out of the knowledge base .docx.
 
 This is the step where quality problems are invisible rather than loud. A bad
 extractor does not crash — it returns *less* text, and the missing content shows
@@ -8,15 +8,16 @@ gaps in TTU's knowledge base. So two things matter here:
 * **Tables are extracted, not skipped.** Policy documents put GPA minimums,
   deadlines and credit requirements in tables. The naive path through python-docx
   (``for p in doc.paragraphs``) silently returns none of them.
-* **Headings are preserved.** They become chunk boundaries in the next step and
-  the citation shown to TTU staff next to a flag.
+* **Formatting is kept, not just text.** TTU's document has no Word heading
+  styles. Its structure lives in bold paragraphs ("If asked questions about X,
+  answer with", then bold questions and labels), which ``structure.py`` reads.
+  So every paragraph records whether it is bold and whether it is a list item.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,9 +26,9 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from ..models import KbBlock
+from ..models import KbParagraph
 
-_HEADING_RE = re.compile(r"^Heading (\d+)$")
+_LIST_STYLE = "List Paragraph"
 
 
 def _iter_block_items(document: Document):
@@ -35,7 +36,7 @@ def _iter_block_items(document: Document):
 
     python-docx exposes ``document.paragraphs`` and ``document.tables`` as two
     separate lists, which loses their interleaving — a table would end up
-    detached from the heading it sits under. Walking the underlying XML body
+    detached from the question it answers. Walking the underlying XML body
     keeps document order intact.
     """
     body = document.element.body
@@ -46,13 +47,30 @@ def _iter_block_items(document: Document):
             yield Table(child, document)
 
 
-def _heading_level(paragraph: Paragraph) -> int | None:
-    """Return the heading level of a paragraph, or None if it is body text."""
-    style_name = (paragraph.style.name or "") if paragraph.style else ""
-    if style_name == "Title":
-        return 1
-    match = _HEADING_RE.match(style_name)
-    return int(match.group(1)) if match else None
+def _is_bold(paragraph: Paragraph) -> bool:
+    """True when every visible run in the paragraph renders bold.
+
+    ``run.bold`` has three states: True/False when set on the run itself, None
+    when inherited. Inherited bold is resolved through the run's character style
+    and then the paragraph style, so a bold paragraph style still counts.
+
+    A paragraph with only *some* bold runs ("**Full-time:** 6 credit hours") is
+    body text with an emphasised lead-in, not a label, so it returns False.
+    """
+    runs = [run for run in paragraph.runs if run.text.strip()]
+    if not runs:
+        return False
+
+    paragraph_bold = bool(paragraph.style is not None and paragraph.style.font.bold)
+    for run in runs:
+        bold = run.bold
+        if bold is None and run.style is not None:
+            bold = run.style.font.bold
+        if bold is None:
+            bold = paragraph_bold
+        if not bold:
+            return False
+    return True
 
 
 def _flatten_table(table: Table) -> list[str]:
@@ -83,15 +101,15 @@ def _flatten_table(table: Table) -> list[str]:
     return lines
 
 
-def extract_docx(path: Path) -> list[KbBlock]:
-    """Extract a .docx into ordered blocks, each tagged with its heading path.
+def extract_docx(path: Path) -> list[KbParagraph]:
+    """Extract a .docx into ordered paragraphs with their formatting signals.
 
     Args:
         path: The .docx file to read.
 
     Returns:
-        Blocks in document order. A block is one paragraph, or one flattened
-        table row.
+        Non-empty paragraphs in document order. A table contributes one plain
+        (non-bold) paragraph per flattened row.
 
     Raises:
         FileNotFoundError: if the path does not exist.
@@ -105,62 +123,63 @@ def extract_docx(path: Path) -> list[KbBlock]:
     except Exception as exc:
         raise ValueError(f"Could not read {path.name} as a .docx file: {exc}") from exc
 
-    blocks: list[KbBlock] = []
-    heading_stack: list[str] = []
-    ordinal = 0
+    paragraphs: list[KbParagraph] = []
 
     for item in _iter_block_items(document):
         if isinstance(item, Paragraph):
             text = item.text.strip()
             if not text:
                 continue
-
-            level = _heading_level(item)
-            if level is not None:
-                # Truncate the stack to this heading's depth, then push it, so
-                # "3. Admissions > 3.2 GPA" survives but a sibling heading
-                # replaces its predecessor rather than nesting under it.
-                heading_stack = heading_stack[: level - 1]
-                heading_stack.append(text)
-                continue
-
-            blocks.append(KbBlock(text=text, heading_path=list(heading_stack), ordinal=ordinal))
-            ordinal += 1
+            style_name = item.style.name if item.style is not None else ""
+            paragraphs.append(
+                KbParagraph(
+                    text=text,
+                    bold=_is_bold(item),
+                    is_list=style_name == _LIST_STYLE,
+                    ordinal=len(paragraphs),
+                )
+            )
 
         elif isinstance(item, Table):
             for line in _flatten_table(item):
-                blocks.append(KbBlock(text=line, heading_path=list(heading_stack), ordinal=ordinal))
-                ordinal += 1
+                paragraphs.append(
+                    KbParagraph(text=line, bold=False, is_list=False, ordinal=len(paragraphs))
+                )
 
-    return blocks
+    return paragraphs
 
 
-def content_hash(blocks: list[KbBlock]) -> str:
-    """Hash the extracted content so unchanged documents can be skipped.
+def content_hash(paragraphs: list[KbParagraph]) -> str:
+    """Hash the extracted content so an unchanged document can be skipped.
 
     Hashing the *extracted text* rather than the raw file is deliberate: opening
     and re-saving a .docx changes the file bytes without changing a word of the
-    content, and re-embedding an entire document because someone opened it is a
-    waste of quota.
+    content, and re-embedding the whole knowledge base because someone opened it
+    is a waste of quota.
+
+    The bold and list flags are part of the hash because they decide chunk
+    boundaries: bolding a line turns it into a label and moves chunks around,
+    even though no word changed.
     """
     digest = hashlib.sha256()
-    for block in blocks:
-        digest.update(block.text.encode("utf-8"))
+    for paragraph in paragraphs:
+        digest.update(paragraph.text.encode("utf-8"))
         digest.update(b"\x1f")
-        digest.update(" > ".join(block.heading_path).encode("utf-8"))
+        digest.update(b"B" if paragraph.bold else b"-")
+        digest.update(b"L" if paragraph.is_list else b"-")
         digest.update(b"\x1e")
     return digest.hexdigest()
 
 
-def resolve_version_date(path: Path, kb_dir: Path) -> str:
+def resolve_version_date(path: Path) -> str:
     """Work out the document's version date.
 
-    Prefers an explicit entry in ``kb_meta.json`` next to the documents, since a
+    Prefers an explicit entry in ``kb_meta.json`` next to the document, since a
     file modification time says when someone touched the file, not when the
     policy it describes took effect. Falls back to the mtime when no entry
     exists, which is at least honest about being an approximation.
     """
-    meta_path = kb_dir / "kb_meta.json"
+    meta_path = path.parent / "kb_meta.json"
     if meta_path.exists():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))

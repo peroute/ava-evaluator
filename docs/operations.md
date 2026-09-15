@@ -35,8 +35,9 @@ Copy [`.env.example`](../.env.example) to `.env` to start.
 | `AVA_TOP_K` | `5` | step 5 | Chunks per claim |
 | `AVA_RETRY_K_MULTIPLIER` | `3` | step 6 | Retry searches `TOP_K × this` |
 | `AVA_MAX_WORKERS` | `4` | steps 5, 6 | Thread pool size for embed/judge calls |
-| `AVA_CHUNK_TARGET_CHARS` | `1200` | step 2 | Soft ceiling on chunk size |
-| `AVA_CHUNK_OVERLAP_RATIO` | `0.15` | step 2 | Share of the target carried into the next chunk |
+| `AVA_KB_FILE` | `sample_data/kb/sample_online.docx` | step 2 | The knowledge base `.docx`. Set to `realdata/online.docx` for real runs |
+| `AVA_CHUNK_TARGET_CHARS` | `1200` | step 2 | Soft ceiling on a chunk's body; reference sections are packed up to it |
+| `AVA_CHUNK_OVERLAP_RATIO` | `0.15` | step 2 | Share of the target carried between the parts of one oversized section (never across sections) |
 | `POSTGRES_USER` / `_PASSWORD` / `_DB` | `ava` / `ava` / `ava_eval` | compose | Used when the volume is first created |
 | `AVA_DB_PORT` | `5433` | compose | Host port for the database |
 
@@ -171,9 +172,12 @@ python -m pytest
 | File | Covers |
 |---|---|
 | [`test_ingest.py`](../tests/test_ingest.py) | transcript validation, batch resilience, re-ingest |
-| [`test_kb.py`](../tests/test_kb.py) | table extraction, heading paths, chunk boundaries and overlap, hashing |
-| [`test_retrieve_and_rollup.py`](../tests/test_retrieve_and_rollup.py) | pgvector search vs brute force, normalisation, severity rollup, cascades, constraints |
-| [`test_judge_policy.py`](../tests/test_judge_policy.py) | the `NOT_FOUND`-only retry and tagging, prompt loading, dimension-mismatch errors |
+| [`test_kb.py`](../tests/test_kb.py) | bold/list/table extraction, topic markers, scaffold and TOC handling, label ownership and parents, catalog groups, chunk packing, ids, content survival, hashing |
+| [`test_kb_realdata.py`](../tests/test_kb_realdata.py) | the same properties on `realdata/online.docx` (skipped when the file is absent): topic count, no cross-topic chunks, pasted program pages, nothing lost |
+| [`test_kb_versioning.py`](../tests/test_kb_versioning.py) | chunk kind column, KB replacement, verdicts recording the KB version, the stale-verdict flag and report warning, migration 0003 round trip |
+| [`test_retrieve_and_rollup.py`](../tests/test_retrieve_and_rollup.py) | pgvector search vs brute force, normalisation, severity rollup, cascades, constraints, `UNJUDGED` turns and counts (migration 0004) |
+| [`test_judge_policy.py`](../tests/test_judge_policy.py) | the `NOT_FOUND`-only retry and tagging, the live judge (fake model): evidence-id check, a failed claim not losing the others, failed-retry fallback; prompt loading, dimension-mismatch errors |
+| [`test_cli_evaluate.py`](../tests/test_cli_evaluate.py) | `evaluate` exits 1 when any claim is unjudged or a conversation errored |
 | [`test_timezone.py`](../tests/test_timezone.py) | display zone for app and other clients, stored instants unchanged |
 
 ---
@@ -181,8 +185,13 @@ python -m pytest
 ## Going live
 
 1. Put `GEMINI_API_KEY` in `.env`.
-2. `AVA_STUB_EMBED=0`, then `python -m ava_eval index-kb --force` (the stored vectors must be rebuilt with the real model).
-3. `AVA_STUB_LLM=0`, then implement `_classify_live`, `_decompose_live`, `_judge_live` **one at a time**, running
-   `evaluate` after each. Because every stage is saved, a failed attempt only costs you that step.
-4. Check `GET /health` reports `stub_llm: false, stub_embed: false` before showing results to anyone.
-5. Before exposing the API beyond your machine: restrict CORS `allow_origins` in [`api/main.py`](../ava_eval/api/main.py).
+2. `AVA_KB_FILE=realdata/online.docx` and `AVA_STUB_EMBED=0`, then `python -m ava_eval index-kb --force` (the stored
+   vectors must be rebuilt with the real model). Indexing makes one embedding call per chunk, about 320 for the real document.
+3. `python -m ava_eval migrate` (applies 0004, which the report needs for `UNJUDGED` counts).
+4. `AVA_STUB_LLM=0` turns steps 3, 4 and 6 live together. Try one conversation first:
+   `python -m ava_eval evaluate --session <id>`, then `report --session <id>`.
+5. If `evaluate` prints `x <claim_id>: ...` lines and exits 1, those claims could not be judged (quota, bad JSON, or the
+   judge cited a chunk it was not shown). Every other verdict in the conversation was still saved; the claims show as
+   `UNJUDGED` in the report. Re-run `evaluate` to retry them. Note a re-run redoes steps 3–6 for that conversation.
+6. Check `GET /health` reports `stub_llm: false, stub_embed: false` before showing results to anyone.
+7. Before exposing the API beyond your machine: restrict CORS `allow_origins` in [`api/main.py`](../ava_eval/api/main.py).

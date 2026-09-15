@@ -98,7 +98,7 @@ verdict.** Every command prints its mode. See [stub vs live](docs/overview.md#st
 |---|---|---|
 | `migrate` | — | After cloning, and whenever someone adds a migration |
 | `ingest --input DIR` | 1 | When new transcripts arrive |
-| `index-kb --kb-dir DIR [--force]` | 2 | When TTU edits a knowledge base document |
+| `index-kb [--kb-file FILE] [--force]` | 2 | When TTU edits the knowledge base document (`AVA_KB_FILE`, default: the sample KB) |
 | `evaluate [--session ID]` | 3–6 | To produce verdicts |
 | `report [--session ID]` | 7 | To read the results |
 | `serve [--port N]` | — | To let the frontend query results |

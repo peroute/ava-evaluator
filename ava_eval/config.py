@@ -65,6 +65,7 @@ class Settings:
     max_workers: int
     chunk_target_chars: int
     chunk_overlap_ratio: float
+    kb_file: Path
     display_timezone: str
 
     @classmethod
@@ -92,6 +93,13 @@ class Settings:
             max_workers=_env_int("AVA_MAX_WORKERS", 4),
             chunk_target_chars=_env_int("AVA_CHUNK_TARGET_CHARS", 1200),
             chunk_overlap_ratio=_env_float("AVA_CHUNK_OVERLAP_RATIO", 0.15),
+            # The sample KB by default, because TTU's real document is not in the
+            # repository; a fresh clone still indexes something after running
+            # scripts/make_sample_kb.py. Real runs set AVA_KB_FILE in .env.
+            kb_file=Path(
+                os.getenv("AVA_KB_FILE")
+                or PROJECT_ROOT / "sample_data" / "kb" / "sample_online.docx"
+            ),
             # The zone timestamps are *shown* in. Storage is unaffected: TIMESTAMPTZ
             # holds an absolute instant. An IANA name, not a fixed offset, so
             # daylight saving time is handled (Lubbock is -05:00 CDT, -06:00 CST).

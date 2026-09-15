@@ -27,6 +27,7 @@ _LABELS = {
     "CONTRADICTED": "CONTRADICTED  (Ava said something the KB refutes)",
     "NOT_FOUND": "NOT_FOUND     (KB cannot confirm it)",
     "SUPPORTED": "SUPPORTED     (grounded in the KB)",
+    "UNJUDGED": "UNJUDGED      (judge failed, re-run evaluate)",
     "NO_CLAIMS": "NO_CLAIMS     (flagged, but nothing checkable found)",
     "NOT_EVALUATED": "NOT_EVALUATED (conversational filler)",
     "UNCLASSIFIED": "UNCLASSIFIED  (not yet evaluated)",
@@ -44,6 +45,11 @@ def conversation_report(conn: Connection, session_id: str | None = None) -> dict
             for verdict in ("CONTRADICTED", "NOT_FOUND")
             for row in store.claim_results(conn, session_id=session_id, verdict=verdict, limit=500)
         ],
+        # Claims step 6 could not judge. Listed separately: they are not flags
+        # about Ava, they are gaps in this run.
+        "unjudged_claims": store.claim_results(
+            conn, session_id=session_id, unjudged=True, limit=500
+        ),
     }
 
 
@@ -71,6 +77,8 @@ def format_report(report: dict[str, Any]) -> str:
         f"{totals['conversations']} conversations | {totals['turns']} turns | "
         f"{totals['claims']} claims | {totals['kb_chunks']} KB chunks indexed"
     )
+    if totals["unjudged"]:
+        lines.append(f"[!] {totals['unjudged']} claims are UNJUDGED -- re-run evaluate")
     lines.append("")
 
     by_verdict = stats["by_verdict"]
@@ -97,9 +105,19 @@ def format_report(report: dict[str, Any]) -> str:
             f"contradicted {row['contradicted_turns']} | "
             f"not_found {row['not_found_turns']} | "
             f"supported {row['supported_turns']} | "
-            f"skipped {row['skipped_turns']}"
+            f"skipped {row['skipped_turns']} | "
+            f"unjudged {row['unjudged_turns']}"
         )
     lines.append("")
+
+    unjudged = report["unjudged_claims"]
+    if unjudged:
+        lines.append(f"Unjudged claims ({len(unjudged)})")
+        lines.append("-" * 72)
+        for row in unjudged:
+            lines.append(f"  UNJUDGED  {row['session_id']} pair {row['pair_index']}")
+            lines.append(f"    claim   : {row['claim_text']}")
+        lines.append("")
 
     flagged = report["flagged_claims"]
     if not flagged:
@@ -115,9 +133,13 @@ def format_report(report: dict[str, Any]) -> str:
         lines.append(f"    claim   : {row['claim_text']}")
         lines.append(f"    why     : {row['rationale']}")
         if row["evidence_chunk_id"]:
+            lines.append(f"    evidence: {row['evidence_section']} ({row['evidence_chunk_id']})")
+        if row.get("kb_changed_since_judged"):
+            # Chunk ids are positional: after the KB changes, this id may name a
+            # different passage than the one the judge actually read.
             lines.append(
-                f"    evidence: {row['evidence_source_doc']} > {row['evidence_section']} "
-                f"({row['evidence_chunk_id']})"
+                "    [!] the knowledge base changed since this verdict -- the evidence shown "
+                "may not be what was judged; re-run evaluate"
             )
         lines.append("")
 
