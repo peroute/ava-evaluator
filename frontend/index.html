@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AVA Evaluation Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">TTU Online</p>
+      <h1>AVA Evaluation Dashboard</h1>
+      <p class="header-copy">Check Ava's transcript responses against the knowledge base.</p>
+    </div>
+    <nav class="site-nav" aria-label="Primary">
+      <a href="#/" data-nav="submit">Evaluate</a>
+      <a href="#/conversations" data-nav="list">Conversations</a>
+    </nav>
+  </header>
+
+  <div id="stub-warning" class="stub-warning" role="status" hidden>
+    <strong>Stub/offline mode</strong>
+    <span>Evaluator results are currently using one or more offline substitutes.</span>
+  </div>
+
+  <main>
+    <section id="error-panel" class="panel error-panel" role="alert" hidden>
+      <p class="step-label">Something needs attention</p>
+      <h2 id="error-title">Something went wrong</h2>
+      <p id="error-message"></p>
+      <a id="error-link" class="error-link" hidden></a>
+    </section>
+
+    <div id="submit-view">
+      <section id="submission-panel" class="panel submission-panel" aria-labelledby="submission-title">
+        <div class="section-heading">
+          <div>
+            <p class="step-label">Submit</p>
+            <h2 id="submission-title">Transcript JSON</h2>
+          </div>
+          <label class="file-button" for="transcript-file">Choose JSON file</label>
+          <input id="transcript-file" type="file" accept=".json,application/json">
+        </div>
+
+        <p class="hint">Choose a file or paste one transcript below. The backend performs authoritative validation.</p>
+        <label class="sr-only" for="transcript-json">Transcript JSON</label>
+        <textarea id="transcript-json" rows="15" spellcheck="false" aria-describedby="json-message">{
+  "provider_session_id": "conv_demo_001",
+  "raw_pairs": [
+    {
+      "pair_index": 0,
+      "caller_asked": "What are the admission requirements?",
+      "agent_said": "The minimum GPA requirement is 2.0."
+    }
+  ]
+}</textarea>
+        <div id="json-message" class="form-message" role="alert" hidden></div>
+        <div class="actions">
+          <button id="evaluate-button" type="button">Evaluate Transcript</button>
+          <span class="privacy-note">Transcript text stays in the box after evaluation or errors.</span>
+        </div>
+      </section>
+
+      <section id="loading-state" class="panel loading-state" aria-live="polite" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <div>
+          <h2>Evaluating transcript…</h2>
+          <p>Classifying responses and checking claims against the knowledge base.</p>
+        </div>
+      </section>
+    </div>
+
+    <section id="list-view" aria-labelledby="list-title" hidden>
+      <div class="results-heading">
+        <div>
+          <p class="step-label">Browse</p>
+          <h2 id="list-title">Conversations</h2>
+        </div>
+        <button id="refresh-conversations" class="secondary-button" type="button">Refresh</button>
+      </div>
+      <p class="hint">Every evaluated conversation, worst first. Open one to see its turns and claims.</p>
+      <p id="list-status" class="empty-note" role="status"></p>
+      <div class="table-wrap">
+        <table class="conversation-table">
+          <thead>
+            <tr>
+              <th scope="col">Session</th>
+              <th scope="col" class="count-cell">Turns</th>
+              <th scope="col" class="count-cell">Contradicted</th>
+              <th scope="col" class="count-cell">Not found</th>
+              <th scope="col" class="count-cell">Supported</th>
+              <th scope="col" class="count-cell">Not judged</th>
+              <th scope="col" class="count-cell">Skipped</th>
+            </tr>
+          </thead>
+          <tbody id="conversation-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="results" aria-labelledby="results-title" hidden>
+      <a class="back-link" href="#/conversations">← All conversations</a>
+      <div class="results-heading">
+        <div>
+          <p class="step-label">Results</p>
+          <h2 id="results-title">Evaluation details</h2>
+        </div>
+        <span id="result-session" class="session-chip"></span>
+      </div>
+      <p id="result-note" class="result-note" hidden></p>
+      <div id="summary-grid" class="summary-grid"></div>
+      <div class="results-controls">
+        <label>Order
+          <select id="turn-order">
+            <option value="worst">Worst first</option>
+            <option value="transcript">Transcript order</option>
+          </select>
+        </label>
+        <label>Show
+          <select id="turn-filter">
+            <option value="all">All turns</option>
+            <option value="review">Needs review</option>
+          </select>
+        </label>
+      </div>
+      <div id="turn-list" class="turn-list"></div>
+    </section>
+  </main>
+
+  <footer>AVA Evaluator · Results are grounded in the configured TTU knowledge base.</footer>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

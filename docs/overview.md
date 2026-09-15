@@ -9,7 +9,8 @@ Start here. This page is the big picture: what the system is for, how the parts 
 | 1 | **Overview** (this page) | understand the problem, the verdicts, and the architecture |
 | 2 | [Walkthrough](walkthrough.md) | watch one real conversation go through all 7 steps, with the actual database rows |
 | 3 | Step docs: [1 Ingest](steps/s1-ingest.md) · [2 Index KB](steps/s2-index-kb.md) · [3 Classify](steps/s3-classify.md) · [4 Decompose](steps/s4-decompose.md) · [5 Retrieve](steps/s5-retrieve.md) · [6 Judge](steps/s6-judge.md) · [7 Aggregate](steps/s7-aggregate.md) | see how one step works in code, why it's built that way, and what can go wrong |
-| 4 | [Operations](operations.md) | run, configure, test, migrate, and work with Docker |
+| 4 | [Frontend](frontend.md) | see how staff submit a transcript and browse results in the browser |
+| 5 | [Operations](operations.md) | run, configure, test, migrate, and work with Docker |
 
 Every step doc uses the same sections: *What it does → Inputs/outputs → How the code works → Stub vs live → Why it's
 built this way → Gotchas → Tests → Connects to.*
@@ -65,19 +66,21 @@ flowchart TD
     S2 -.->|kb_chunks| S5
 ```
 
-Three commands, because the steps are triggered by different things:
+Separate entry points, because the steps are triggered by different things:
 
-| Command | Steps | Triggered by |
+| Entry point | Steps | Triggered by |
 |---|---|---|
 | `ingest` | 1 | new transcripts arriving |
 | `index-kb` | 2 | TTU editing a KB document |
 | `evaluate` | 3–6 | wanting verdicts |
 | `report` / `serve` | 7 | wanting to read them |
+| [Frontend](frontend.md) / `POST /evaluations` | 1, 3–6 | a staff member submitting one transcript |
 
 **Every step saves its output to the database.** So you can change the judge prompt and re-run steps 3–6 without
 re-ingesting, re-chunking, or re-embedding anything. `evaluate` is orchestrated by
-[`pipeline.evaluate`](../ava_eval/pipeline.py#L56), which processes **one conversation at a time**, each inside its own
-savepoint, so one failure doesn't take down the batch.
+[`pipeline.evaluate`](../ava_eval/pipeline.py), which processes **one conversation at a time**, each inside its own
+savepoint, so one failure doesn't take down the batch. The frontend's submit calls the same function for one
+conversation.
 
 ---
 
@@ -87,15 +90,17 @@ savepoint, so one failure doesn't take down the batch.
 
 ```
 ava_eval/
-  config.py        every setting, read from env. The ONLY place os.getenv is called
-  models.py        Pydantic contracts between steps + the Gemini output schemas
-  pipeline.py      orchestrates steps 3-6 per conversation
-  cli.py           argparse subcommands: migrate, ingest, index-kb, evaluate, report, serve
-  steps/           s1_ingest … s7_aggregate (one module per step)
-  kb/              extract.py (.docx → blocks), chunk.py (blocks → chunks)
-  llm/             client.py (embeddings + structured generation), prompts/*.md
-  db/              store.py (ALL SQL), migrate.py, migrations/ (Alembic)
-  api/main.py      read-only FastAPI for a frontend
+  config.py              every setting, read from env. The ONLY place os.getenv is called
+  models.py              Pydantic contracts between steps + the Gemini output schemas
+  pipeline.py            orchestrates steps 3-6 per conversation
+  evaluation_service.py  one submitted transcript: step 1, then steps 3-6, then its results
+  cli.py                 argparse subcommands: migrate, ingest, index-kb, evaluate, report, serve
+  steps/                 s1_ingest … s7_aggregate (one module per step)
+  kb/                    extract.py (.docx → blocks), structure.py (blocks → labelled sections), chunk.py (sections → chunks)
+  llm/                   client.py (embeddings + structured generation), prompts/*.md
+  db/                    store.py (ALL SQL), migrate.py, migrations/ (Alembic)
+  api/main.py            FastAPI: read-only result endpoints + POST /evaluations
+frontend/                static page served by nginx: index.html, app.js (rendering), lib.js (logic, tested with node --test)
 ```
 
 ### Boundaries that keep it maintainable
@@ -146,7 +151,8 @@ stale-verdict flag. `CHECK` constraints mirror the enums in `models.py`, so a mi
 
 - **PostgreSQL 17 + pgvector**, run by `docker compose`. Similarity search happens inside the database ([Step 5](steps/s5-retrieve.md)).
 - **Gemini** for generation (`AVA_JUDGE_MODEL`) and embeddings (`gemini-embedding-2`, 768 dimensions).
-- **One Docker image** runs the API, the migrations, and the CLI. See [Operations](operations.md).
+- **Two Docker images:** the Python image runs the API, the migrations, and the CLI; an nginx image serves the
+  [frontend](frontend.md) and forwards `/api/` to the API. See [Operations](operations.md#docker).
 
 ---
 

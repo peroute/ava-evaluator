@@ -23,13 +23,13 @@ missed it".
 | | |
 |---|---|
 | **Reads** | `Claim`s + step 5's results dict |
-| **LLM returns** | [`JudgeResponse`](../../ava_eval/models.py#L223): `verdict`, `rationale`, `evidence_chunk_id` |
-| **Produces** | `JudgeBatch`: `verdicts` (list of [`ClaimVerdict`](../../ava_eval/models.py#L306), which adds `tag` (`kb_gap` / `retrieval_miss` / none) and `attempts`) and `failures` (claim id → error, for claims that got no verdict) |
-| **Writes** | `verdicts` via [`store.save_verdict`](../../ava_eval/db/store.py#L574), plus `claim_retrievals` rows with `attempt=2` for retried claims |
+| **LLM returns** | [`JudgeResponse`](../../ava_eval/models.py): `verdict`, `rationale`, `evidence_chunk_id` |
+| **Produces** | `JudgeBatch`: `verdicts` (list of [`ClaimVerdict`](../../ava_eval/models.py), which adds `tag` (`kb_gap` / `retrieval_miss` / none) and `attempts`) and `failures` (claim id → error, for claims that got no verdict) |
+| **Writes** | `verdicts` via [`store.save_verdict`](../../ava_eval/db/store.py), plus `claim_retrievals` rows with `attempt=2` for retried claims |
 
 ## How the code works
 
-[`judge_claims(conn, claims, retrievals)`](../../ava_eval/steps/s6_judge.py#L278):
+[`judge_claims(conn, claims, retrievals)`](../../ava_eval/steps/s6_judge.py):
 
 ```mermaid
 flowchart TD
@@ -43,7 +43,7 @@ flowchart TD
 
 1. **First pass, in parallel:** `judge_claim` for every claim through a `ThreadPoolExecutor`.
 2. Everything that isn't `NOT_FOUND` is final.
-3. `NOT_FOUND` claims are searched again through [`retrieve_for_claims`](../../ava_eval/steps/s5_retrieve.py#L56) with
+3. `NOT_FOUND` claims are searched again through [`retrieve_for_claims`](../../ava_eval/steps/s5_retrieve.py) with
    `k = AVA_TOP_K × AVA_RETRY_K_MULTIPLIER` and `attempt=2`.
 4. Each one is judged again on the whole widened set (one claim after another), unconditionally. Still `NOT_FOUND` →
    `kb_gap`. Anything else → the evidence was there all along → `retrieval_miss`.
@@ -60,7 +60,7 @@ still crashes):
 
 The fallback is untagged on purpose: `kb_gap` vs `retrieval_miss` is decided *by* the retry, and it never ran.
 
-[`render_excerpts`](../../ava_eval/steps/s6_judge.py#L80) formats the chunks for the prompt. Each carries its
+[`render_excerpts`](../../ava_eval/steps/s6_judge.py) formats the chunks for the prompt. Each carries its
 `chunk_id` (the judge has to name the chunk it used), its `source` (the chunk's `Group > Topic > Label` header, which
 is how the judge knows which program an excerpt belongs to), and its similarity score.
 
@@ -71,7 +71,7 @@ a verdict was judged against an older version of the knowledge base.
 
 | `AVA_STUB_LLM=1` (default) | `AVA_STUB_LLM=0` |
 |---|---|
-| [`_judge_stub`](../../ava_eval/steps/s6_judge.py#L110): finds the chunk sharing the most content words with the claim. Under 35% overlap → `NOT_FOUND`. Enough overlap but **no number in common** → `CONTRADICTED`. Otherwise `SUPPORTED`. | [`_judge_live`](../../ava_eval/steps/s6_judge.py#L199): `load_prompt("judge_claim", subject_tag=..., claim_text=..., excerpts=render_excerpts(chunks))` → `generate_structured(prompt, JudgeResponse)` → [`_check_evidence`](../../ava_eval/steps/s6_judge.py#L170) |
+| [`_judge_stub`](../../ava_eval/steps/s6_judge.py): finds the chunk sharing the most content words with the claim. Under 35% overlap → `NOT_FOUND`. Enough overlap but **no number in common** → `CONTRADICTED`. Otherwise `SUPPORTED`. | [`_judge_live`](../../ava_eval/steps/s6_judge.py): `load_prompt("judge_claim", subject_tag=..., claim_text=..., excerpts=render_excerpts(chunks))` → `generate_structured(prompt, JudgeResponse)` → [`_check_evidence`](../../ava_eval/steps/s6_judge.py) |
 
 `AVA_STUB_LLM` is one switch for steps 3, 4 and 6 together.
 

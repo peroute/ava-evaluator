@@ -15,7 +15,12 @@ import pytest
 
 from ava_eval.db import store
 from ava_eval.models import ConversationStatus
-from ava_eval.steps.s1_ingest import TranscriptFormatError, ingest_directory, parse_export_v1
+from ava_eval.steps.s1_ingest import (
+    TranscriptFormatError,
+    ingest_directory,
+    ingest_payload,
+    parse_export_v1,
+)
 
 
 def _pair(index: int, asked: str = "q", said: str = "a") -> dict:
@@ -140,3 +145,35 @@ def test_reingesting_replaces_turns(tmp_path: Path, db_url: str) -> None:
 
     with store.connect(db_url) as conn:
         assert len(store.get_turns(conn, "c_1")) == 2
+
+
+def test_ingests_one_in_memory_payload(db_url: str) -> None:
+    report = ingest_payload(_conversation("submitted_1"), database_url=db_url)
+
+    assert [conversation.session_id for conversation in report.accepted] == ["submitted_1"]
+    assert report.rejected == []
+    with store.connect(db_url) as conn:
+        assert len(store.get_turns(conn, "submitted_1")) == 2
+
+
+def test_in_memory_rejection_is_visible_without_bad_turns(db_url: str) -> None:
+    report = ingest_payload(_conversation("submitted_bad", pairs=[_pair(1)]), database_url=db_url)
+
+    assert report.accepted == []
+    assert [rejected.session_id for rejected in report.rejected] == ["submitted_bad"]
+    with store.connect(db_url) as conn:
+        assert store.list_sessions(conn, ConversationStatus.REJECTED) == ["submitted_bad"]
+        assert store.get_turns(conn, "submitted_bad") == []
+
+
+def test_reingesting_an_in_memory_payload_replaces_turns(db_url: str) -> None:
+    ingest_payload(_conversation("submitted_2"), database_url=db_url)
+    ingest_payload(
+        _conversation("submitted_2", pairs=[_pair(0, asked="replacement")]),
+        database_url=db_url,
+    )
+
+    with store.connect(db_url) as conn:
+        turns = store.get_turns(conn, "submitted_2")
+    assert len(turns) == 1
+    assert turns[0].caller_asked == "replacement"

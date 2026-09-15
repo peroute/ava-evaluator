@@ -213,16 +213,15 @@ def generate_structured(
             model=settings.judge_model,
             input=prompt,
             system_instruction=system_instruction,
+            # Do not also pass response_mime_type. The SDK docstring calls it
+            # required alongside response_format, but the server rejects the
+            # pair with 400 "responseFormat must be set when responseMimeType is
+            # set". The mime_type inside response_format is the one it reads.
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
                 "schema": schema.model_json_schema(),
             },
-            # The SDK documents response_mime_type as required whenever
-            # response_format is set, even though the format already carries a
-            # mime_type of its own. Sending both is harmless and avoids relying
-            # on which of the two the server reads.
-            response_mime_type="application/json",
             generation_config={"temperature": temperature},
         )
 

@@ -17,27 +17,28 @@ Business, the minimum GPA is 2.5". It's the hardest step, and everything after i
 | | |
 |---|---|
 | **Reads** | all `Turn`s for one conversation + the step 3 `by_index` dict |
-| **LLM returns** | [`ConversationClaims`](../../ava_eval/models.py#L185), a list of [`TurnClaims`](../../ava_eval/models.py#L169) (`pair_index`, `subject_tag`, `claims`), each claim an [`ExtractedClaim`](../../ava_eval/models.py#L150) (`text`, `scope_derived_from_pair_index`) |
-| **Produces** | flat [`Claim`](../../ava_eval/models.py#L191) list with ids |
-| **Writes** | `claims`, via [`store.replace_claims_for_session`](../../ava_eval/db/store.py#L444) |
+| **LLM returns** | [`ConversationClaims`](../../ava_eval/models.py), a list of [`TurnClaims`](../../ava_eval/models.py) (`pair_index`, `subject_tag`, `claims`), each claim an [`ExtractedClaim`](../../ava_eval/models.py) (`text`, `scope_derived_from_pair_index`) |
+| **Produces** | flat [`Claim`](../../ava_eval/models.py) list with ids |
+| **Writes** | `claims`, via [`store.replace_claims_for_session`](../../ava_eval/db/store.py) |
 
 ## How the code works
 
-1. [`pipeline.evaluate`](../../ava_eval/pipeline.py#L115) calls [`decompose_conversation`](../../ava_eval/steps/s4_decompose.py#L122), which switches between stub and live.
-2. **Live** ([`_decompose_live`](../../ava_eval/steps/s4_decompose.py#L90)): if no turn was flagged, return no claims without
+1. [`pipeline.evaluate`](../../ava_eval/pipeline.py) calls [`decompose_conversation`](../../ava_eval/steps/s4_decompose.py), which switches between stub and live.
+2. **Live** ([`_decompose_live`](../../ava_eval/steps/s4_decompose.py)): if no turn was flagged, return no claims without
    calling the model. Otherwise render the transcript, fill the prompt, call `generate_structured(prompt, ConversationClaims)`.
-   [`render_transcript`](../../ava_eval/steps/s4_decompose.py#L34) prints **every** turn, including unflagged ones, in the
+   [`render_transcript`](../../ava_eval/steps/s4_decompose.py) prints **every** turn, including unflagged ones, in the
    exact format the prompt's worked example uses:
    ```
    [pair 1] caller: The general business one.
               agent:  Great choice. The Online Bachelor of Business Administration ...
               contains_claims: true
    ```
-3. [`to_claims`](../../ava_eval/steps/s4_decompose.py#L131) flattens the response into `Claim` rows:
+3. [`to_claims`](../../ava_eval/steps/s4_decompose.py) flattens the response into `Claim` rows:
    - drops any turn whose `pair_index` isn't in this conversation (the model can invent one)
    - drops empty claim text
    - filters `scope_derived_from` to indexes that actually exist
-   - builds a **positional id**: `{session}__p{pair}__c{n}`, e.g. `conv_demo_001__p2__c0`
+   - builds a **positional id**: `{session}__p{pair}__c{n}`, e.g. `conv_demo_001__p2__c0`. The `n` counter is kept per
+     `pair_index`, so if the model returns the same turn twice the ids keep counting instead of colliding
 4. `replace_claims_for_session` deletes the session's old claims and inserts the new ones. The database's
    `ON DELETE CASCADE` also deletes their old retrievals and verdicts.
 
@@ -45,7 +46,7 @@ Business, the minimum GPA is 2.5". It's the hardest step, and everything after i
 
 | `AVA_STUB_LLM=1` (default) | `AVA_STUB_LLM=0` |
 |---|---|
-| [`_decompose_stub`](../../ava_eval/steps/s4_decompose.py#L59): one claim per sentence of 4+ words that isn't a question. **No scope resolution:** the text is copied as-is, and `subject_tag` is always `[stub] unresolved subject`. | [`_decompose_live`](../../ava_eval/steps/s4_decompose.py#L90): one Gemini call per conversation with the whole rendered transcript. The model resolves each claim's scope and returns a `subject_tag` per turn and `scope_derived_from_pair_index` per claim. Skips the call when nothing was flagged. |
+| [`_decompose_stub`](../../ava_eval/steps/s4_decompose.py): one claim per sentence of 4+ words that isn't a question. **No scope resolution:** the text is copied as-is, and `subject_tag` is always `[stub] unresolved subject`. | [`_decompose_live`](../../ava_eval/steps/s4_decompose.py): one Gemini call per conversation with the whole rendered transcript. The model resolves each claim's scope and returns a `subject_tag` per turn and `scope_derived_from_pair_index` per claim. Skips the call when nothing was flagged. |
 
 What the stub skips (resolving scope) is the whole reason this step needs a language model.
 
@@ -70,17 +71,20 @@ What the stub skips (resolving scope) is the whole reason this step needs a lang
   read the format.
 - A flagged turn that comes back with `claims: []` is normal (step 3 over-includes on purpose). It shows as
   `NO_CLAIMS` in step 7.
-- Conversations are processed **one after another** ([`pipeline.py:93`](../../ava_eval/pipeline.py#L93)), so an error
+- Conversations are processed **one after another** (the loop in [`pipeline.evaluate`](../../ava_eval/pipeline.py)), so an error
   always points to one specific conversation.
 
 ## Tests
 
-[`test_replacing_claims_cascades_to_verdicts`](../../tests/test_retrieve_and_rollup.py#L222) checks the cascade.
-No dedicated test for `to_claims` or the stub yet.
+[`tests/test_decompose.py`](../../tests/test_decompose.py): the live path sends the rendered transcript (fake model),
+no model call when nothing was flagged, `to_claims` drops a `pair_index` that isn't in the conversation, and ids stay
+unique when the model repeats a turn. [`test_replacing_claims_cascades_to_verdicts`](../../tests/test_retrieve_and_rollup.py)
+checks the cascade, and [`test_classify.py`](../../tests/test_classify.py) checks a `false` turn yields no claims.
+The stub's sentence splitting has no dedicated test yet.
 
 ## Connects to
 
 - **Previous:** [Step 3](s3-classify.md) decides which turns get claims.
 - **Next:** [Step 5](s5-retrieve.md) embeds each `Claim.text` as a search query. If there are no claims, the
-  pipeline skips 5–6 for that conversation ([`pipeline.py:120`](../../ava_eval/pipeline.py#L120)).
+  pipeline skips 5–6 for that conversation (the `if not claims` check in [`pipeline.evaluate`](../../ava_eval/pipeline.py)).
 - **Step 7 / API:** `subject_tag` is a filter on `GET /claims?subject=...`, and the planned Phase 2 groups results by it.

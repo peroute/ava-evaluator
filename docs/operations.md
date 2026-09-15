@@ -47,26 +47,31 @@ A malformed number (e.g. `AVA_TOP_K=five`) silently falls back to the default.
 
 ## Docker
 
-[`docker-compose.yml`](../docker-compose.yml) runs two services from one image ([`Dockerfile`](../Dockerfile)):
+[`docker-compose.yml`](../docker-compose.yml) runs three services from two images: `api` from the Python
+[`Dockerfile`](../Dockerfile), `frontend` from [`frontend/Dockerfile`](../frontend/Dockerfile) (nginx), and the stock
+pgvector image for `db`:
 
 ```mermaid
 flowchart LR
     subgraph host["Your machine (127.0.0.1 only)"]
         CLI["python -m ava_eval / pytest"]
-        B["Browser / frontend"]
+        B["Browser"]
     end
     subgraph compose["docker compose network"]
+        FE["frontend<br/>nginx :80"]
         API["api<br/>migrate && uvicorn :8000"]
         DB[("db<br/>pgvector/pgvector:pg17<br/>:5432")]
     end
     CLI -->|127.0.0.1:5433| DB
-    B -->|127.0.0.1:8000| API
+    B -->|127.0.0.1:8080| FE
+    FE -->|"/api/* → api:8000"| API
+    B -.->|127.0.0.1:8000 /docs| API
     API -->|db:5432| DB
 ```
 
 | Command | Does |
 |---|---|
-| `docker compose up --build` | DB + migrations + API on http://127.0.0.1:8000 |
+| `docker compose up --build` | DB + migrations + API on http://127.0.0.1:8000 + [frontend](frontend.md) on http://127.0.0.1:8080 |
 | `docker compose up -d db` | just the database (for local Python and pytest) |
 | `docker compose run --rm api python -m ava_eval <cmd>` | run a pipeline command inside the image |
 | `docker compose down` | stop. Data survives in the `pgdata` volume |
@@ -74,7 +79,8 @@ flowchart LR
 
 ### Gotchas
 
-- **Use `127.0.0.1`, not `localhost`.** Both ports are published on IPv4 loopback only. `localhost` tries IPv6 (`::1`)
+- **Use `127.0.0.1`, not `localhost`.** All three ports (5433 database, 8000 API, 8080 frontend) are published on
+  IPv4 loopback only. `localhost` tries IPv6 (`::1`)
   first, where nothing is listening, and every connection stalls until that attempt times out. Binding to 127.0.0.1
   also means nothing else on your network can reach the database with its default password.
 - **Inside compose, the database host is `db`**, not `localhost` (inside a container, `localhost` means that same container).
@@ -105,7 +111,7 @@ All SQL is in [`ava_eval/db/store.py`](../ava_eval/db/store.py). The schema is i
 - **Similarity search is exact.** Embeddings are stored unit length, search orders by `<#>`, and there's deliberately no
   HNSW/IVFFlat index. The reasoning is in [Step 5](steps/s5-retrieve.md#why-its-built-this-way).
 - **One failed statement aborts the whole transaction.** After an error, PostgreSQL refuses every later statement until a
-  rollback. [`store.atomic`](../ava_eval/db/store.py#L127) wraps a block in a savepoint so only that block is undone.
+  rollback. [`store.atomic`](../ava_eval/db/store.py) wraps a block in a savepoint so only that block is undone.
   `evaluate` uses one savepoint per conversation.
 - **`store.connect`** commits on success, rolls back on error, and always closes. Rows come back as plain dicts.
 - **Parameters, never string formatting.** psycopg placeholders are `%s` / `%(name)s`, so a literal `%` in SQL (e.g. `LIKE`)
@@ -171,7 +177,9 @@ python -m pytest
 
 | File | Covers |
 |---|---|
-| [`test_ingest.py`](../tests/test_ingest.py) | transcript validation, batch resilience, re-ingest |
+| [`test_ingest.py`](../tests/test_ingest.py) | transcript validation, batch resilience, re-ingest, one in-memory payload (`ingest_payload`) |
+| [`test_classify.py`](../tests/test_classify.py) | stub answers, the live batch call, per-turn fallback, ignoring unknown/duplicate indices, classifications stored as booleans |
+| [`test_decompose.py`](../tests/test_decompose.py) | live prompt carries the rendered transcript, no call when nothing is flagged, `to_claims` id and index rules |
 | [`test_kb.py`](../tests/test_kb.py) | bold/list/table extraction, topic markers, scaffold and TOC handling, label ownership and parents, catalog groups, chunk packing, ids, content survival, hashing |
 | [`test_kb_realdata.py`](../tests/test_kb_realdata.py) | the same properties on `realdata/online.docx` (skipped when the file is absent): topic count, no cross-topic chunks, pasted program pages, nothing lost |
 | [`test_kb_versioning.py`](../tests/test_kb_versioning.py) | chunk kind column, KB replacement, verdicts recording the KB version, the stale-verdict flag and report warning, migration 0003 round trip |
@@ -179,6 +187,18 @@ python -m pytest
 | [`test_judge_policy.py`](../tests/test_judge_policy.py) | the `NOT_FOUND`-only retry and tagging, the live judge (fake model): evidence-id check, a failed claim not losing the others, failed-retry fallback; prompt loading, dimension-mismatch errors |
 | [`test_cli_evaluate.py`](../tests/test_cli_evaluate.py) | `evaluate` exits 1 when any claim is unjudged or a conversation errored |
 | [`test_timezone.py`](../tests/test_timezone.py) | display zone for app and other clients, stored instants unchanged |
+| [`test_migration_0004.py`](../tests/test_migration_0004.py) | migration 0004 downgrades and upgrades cleanly |
+| [`test_api.py`](../tests/test_api.py) | `POST /evaluations` status codes, GET routes unchanged, unjudged fields the frontend reads |
+| [`test_evaluation_service.py`](../tests/test_evaluation_service.py) | submit returns frontend-ready results; rejection, pipeline error and empty KB become the right errors |
+| [`test_frontend.py`](../tests/test_frontend.py) | frontend files and Dockerfile contents, nginx `/api/` proxy, compose service, page controls, no unsafe DOM, no npm dependencies |
+
+The frontend's display logic has its own tests, run with Node (18+, nothing to install). Details in
+[Frontend](frontend.md#tests):
+
+```powershell
+cd frontend
+node --test
+```
 
 ---
 
@@ -195,3 +215,7 @@ python -m pytest
    `UNJUDGED` in the report. Re-run `evaluate` to retry them. Note a re-run redoes steps 3–6 for that conversation.
 6. Check `GET /health` reports `stub_llm: false, stub_embed: false` before showing results to anyone.
 7. Before exposing the API beyond your machine: restrict CORS `allow_origins` in [`api/main.py`](../ava_eval/api/main.py).
+8. **`POST /evaluations` has no authentication, and live, every call spends Gemini quota.** Anyone who can reach
+   `:8000` or the frontend on `:8080` can run evaluations. Keep both on `127.0.0.1` (as compose does) until there's
+   auth in front of them. A slow evaluation through the frontend can hit nginx's 300s timeout (`504`); the pipeline
+   still finishes and saves. See [Frontend](frontend.md#gotchas).

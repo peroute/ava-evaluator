@@ -2,7 +2,7 @@
 
 [← Step 2](s2-index-kb.md) · [Overview](../overview.md) · [Step 4 →](s4-decompose.md)
 
-**Runs inside:** `python -m ava_eval evaluate` · **Code:** [`ava_eval/steps/s3_classify.py`](../../ava_eval/steps/s3_classify.py) · **Prompt:** [`classify_turn.md`](../../ava_eval/llm/prompts/classify_turn.md)
+**Runs inside:** `python -m ava_eval evaluate` · **Code:** [`ava_eval/steps/s3_classify.py`](../../ava_eval/steps/s3_classify.py) · **Prompts:** [`classify_turns_batch.md`](../../ava_eval/llm/prompts/classify_turns_batch.md) (live), [`classify_turn.md`](../../ava_eval/llm/prompts/classify_turn.md) (per-turn fallback)
 
 ## What it does
 
@@ -20,28 +20,33 @@ meaningless `NOT_FOUND` that inflates the gap numbers.
 | **Reads** | a conversation's `Turn`s (from step 1) |
 | **LLM returns** | [`TurnClassification`](../../ava_eval/models.py): `contains_claims: bool`, `reason: str` |
 | **Produces** | [`ClassifiedTurn`](../../ava_eval/models.py) (same fields + `session_id`, `pair_index`) |
-| **Writes** | `turn_classifications`, via [`store.save_classifications`](../../ava_eval/db/store.py#L406) (upsert, so re-running overwrites) |
+| **Writes** | `turn_classifications`, via [`store.save_classifications`](../../ava_eval/db/store.py) (upsert, so re-running overwrites) |
 
 ## How the code works
 
-1. [`pipeline.evaluate`](../../ava_eval/pipeline.py#L102) calls `classify_turns(turns)`.
-2. `classify_turns` loops over the turns **one at a time, in order**, calling `classify_turn`.
-3. `classify_turn` is a switch: `settings.stub_llm` → `_classify_stub`, otherwise `_classify_live`. Steps 4 and 6
-   use the same pattern.
-4. The pipeline saves the results and builds a `pair_index → ClassifiedTurn` dict (`by_index`) for step 4.
+1. [`pipeline.evaluate`](../../ava_eval/pipeline.py) calls [`classify_turns(turns)`](../../ava_eval/steps/s3_classify.py).
+2. **Stub** (`settings.stub_llm`): loops over the turns in order, calling `classify_turn`, which returns
+   `_classify_stub` for each.
+3. **Live**: [`_classify_batch_live`](../../ava_eval/steps/s3_classify.py) sends **every turn in one call**.
+   `_render_turns` prints each as a `[pair N]` block with its `caller:` and `agent:` lines:
 
-The live version is:
+   ```python
+   prompt = load_prompt("classify_turns_batch", turns=_render_turns(turns))
+   response = generate_structured(prompt, BatchClassification)
+   ```
 
-```python
-prompt = load_prompt("classify_turn", caller_asked=turn.caller_asked, agent_said=turn.agent_said)
-return generate_structured(prompt, TurnClassification)
-```
+   The reply is a list of `{pair_index, contains_claims, reason}`. Answers for a `pair_index` that wasn't sent are
+   dropped, and if an index appears twice, the first answer wins.
+4. **Fallback:** any turn the batch reply left out is classified on its own with `_classify_live` (the
+   `classify_turn` prompt, one call for that turn only).
+5. Results come back in turn order, whatever order the model answered in. The pipeline saves them and builds a
+   `pair_index → ClassifiedTurn` dict (`by_index`) for step 4.
 
-[`load_prompt`](../../ava_eval/llm/__init__.py#L10) fills the `{{CALLER_ASKED}}` / `{{AGENT_SAID}}` placeholders and
-raises if one is missing or left unfilled. [`generate_structured`](../../ava_eval/llm/client.py#L191) makes Gemini
-answer in exactly the `TurnClassification` JSON shape (structured output), at temperature 0 with retries on failed calls, and
-validates the reply before returning it. A reply that fails validation is not retried: it raises `LlmError`, and the
-pipeline marks that conversation as errored.
+[`load_prompt`](../../ava_eval/llm/__init__.py) fills the `{{TURNS}}` (or `{{CALLER_ASKED}}` / `{{AGENT_SAID}}`)
+placeholders and raises if one is missing or left unfilled. [`generate_structured`](../../ava_eval/llm/client.py) makes
+Gemini answer in exactly the schema's JSON shape (structured output), at temperature 0 with retries on failed calls,
+and validates the reply before returning it. A reply that fails validation is not retried: it raises `LlmError`, and
+the pipeline marks that conversation as errored.
 
 ## Stub vs live
 
@@ -75,12 +80,14 @@ The stub only needs to produce varied, repeatable output so the rest of the pipe
 
 [`tests/test_classify.py`](../../tests/test_classify.py) covers: the stub's answers (greeting / closing / clarifying
 question → `false`; fact, fact + filler, wrong fact, hedged fact → `true`); the live path with a fake
-`generate_structured` (each prompt carries only its own turn, the model's answer is returned as-is); step 4 extracting nothing from a `false` turn; and, through `pipeline.evaluate` on the Postgres test
+`generate_structured` (all turns go in **one** batch call and results keep turn order even when answered out of order;
+a turn the batch left out gets one fallback call carrying only that turn; unknown and duplicate indices are ignored);
+the schema declaring `contains_claims` a boolean; step 4 extracting nothing from a `false` turn; and, through `pipeline.evaluate` on the Postgres test
 database, that classifications are stored as booleans, `false` turns stay stored, only `true` turns get claims, and
 re-classifying overwrites. How the real model answers those cases is not tested offline. The rollup tests in
 [`tests/test_retrieve_and_rollup.py`](../../tests/test_retrieve_and_rollup.py) check how classifications surface
 (`NOT_EVALUATED` / `NO_CLAIMS` turns are labelled, not dropped), and
-[`test_every_prompt_template_is_loadable`](../../tests/test_judge_policy.py#L223) covers the prompt.
+[`test_every_prompt_template_is_loadable`](../../tests/test_judge_policy.py) covers both prompts.
 
 ## Connects to
 
