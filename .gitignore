@@ -21,3 +21,4 @@ sample_data/kb/*.docx
 .DS_Store
 Thumbs.db
 realdata/online.docx
+realdata/transcripts/conv_marcus_001.json
