@@ -2,7 +2,7 @@
 
 [← Step 4](s4-decompose.md) · [Overview](../overview.md) · [Step 6 →](s6-judge.md)
 
-**Runs inside:** `python -m ava_eval evaluate` · **Code:** [`ava_eval/steps/s5_retrieve.py`](../../ava_eval/steps/s5_retrieve.py), [`store.search_chunks`](../../ava_eval/db/store.py#L329)
+**Runs inside:** `python -m ava_eval evaluate` · **Code:** [`ava_eval/steps/s5_retrieve.py`](../../ava_eval/steps/s5_retrieve.py), [`store.search_chunks`](../../ava_eval/db/store.py)
 
 ## What it does
 
@@ -15,17 +15,17 @@ cosine similarity). Every result is saved, so you can always see exactly what ev
 | | |
 |---|---|
 | **Reads** | `Claim`s (step 4), `kb_chunks` + `kb_documents` (step 2) |
-| **Produces** | `dict[claim_id, list[RetrievedChunk]]`. [`RetrievedChunk`](../../ava_eval/models.py#L207) has `chunk_id`, `text`, `score`, `source_doc`, `section`, `rank` |
+| **Produces** | `dict[claim_id, list[RetrievedChunk]]`. [`RetrievedChunk`](../../ava_eval/models.py) has `chunk_id`, `text`, `score`, `source_doc`, `section`, `rank` |
 | **Writes** | `claim_retrievals` (`claim_id`, `chunk_id`, `attempt`, `rank`, `score`) |
 
 ## How the code works
 
-1. [`retrieve_for_claims(conn, claims, k=None, attempt=1)`](../../ava_eval/steps/s5_retrieve.py#L56) checks the index isn't empty.
-2. [`embed_claims`](../../ava_eval/steps/s5_retrieve.py#L33) embeds all claims **in parallel** with a thread pool
+1. [`retrieve_for_claims(conn, claims, k=None, attempt=1)`](../../ava_eval/steps/s5_retrieve.py) checks the index isn't empty.
+2. [`embed_claims`](../../ava_eval/steps/s5_retrieve.py) embeds all claims **in parallel** with a thread pool
    (`AVA_MAX_WORKERS`, default 4). Each claim goes through `embed_texts([text], is_query=True)`, which adds the prefix
    `task: fact checking | query: <claim>`.
 3. Back on the main thread, for each claim:
-   - [`store.search_chunks(conn, vector, k)`](../../ava_eval/db/store.py#L329) runs
+   - [`store.search_chunks(conn, vector, k)`](../../ava_eval/db/store.py) runs
      ```sql
      SELECT c.chunk_id, c.text, c.section, d.source_doc,
             -(c.embedding <#> %(query)s) AS score
@@ -33,10 +33,10 @@ cosine similarity). Every result is saved, so you can always see exactly what ev
      ORDER BY c.embedding <#> %(query)s, c.chunk_id
      LIMIT %(k)s
      ```
-     `<#>` is pgvector's *negative* inner product. Both sides are scaled to length 1 ([`normalise`](../../ava_eval/db/store.py#L144)),
+     `<#>` is pgvector's *negative* inner product. Both sides are scaled to length 1 ([`normalise`](../../ava_eval/db/store.py)),
      and for vectors of length 1 the inner product *is* the cosine similarity. So `-(a <#> b)` is the similarity score,
      and sorting ascending by `<#>` puts the best match first. `chunk_id` breaks ties so the order is always the same.
-   - [`store.save_retrievals`](../../ava_eval/db/store.py#L512) saves the results with the `attempt` number.
+   - [`store.save_retrievals`](../../ava_eval/db/store.py) saves the results with the `attempt` number.
 4. `k` defaults to `AVA_TOP_K` (5). Step 6 calls this function again with `k = 5 × AVA_RETRY_K_MULTIPLIER` (15) and `attempt=2`.
 
 Before searching, `search_chunks` checks that every stored embedding has the same size, and that the query is that size
@@ -77,11 +77,11 @@ The SQL search is always real.
 
 [`tests/test_retrieve_and_rollup.py`](../../tests/test_retrieve_and_rollup.py): nearest first, scores descending,
 `k` larger or smaller than the index, empty index, query normalisation, **pgvector results match a brute-force numpy
-comparison** ([`test_search_is_exact_brute_force`](../../tests/test_retrieve_and_rollup.py#L88)), stored vectors are unit length.
-[`test_dimension_mismatch_explains_itself`](../../tests/test_judge_policy.py#L185) covers the error message.
+comparison** ([`test_search_is_exact_brute_force`](../../tests/test_retrieve_and_rollup.py)), stored vectors are unit length.
+[`test_dimension_mismatch_explains_itself`](../../tests/test_judge_policy.py) covers the error message.
 
 ## Connects to
 
 - **Previous:** [Step 4](s4-decompose.md) made claims self-contained. [Step 2](s2-index-kb.md) built the index.
 - **Next:** [Step 6](s6-judge.md) receives the results dict, and calls back into this step for the wider retry.
-- **API:** `GET /claims/{id}` returns `attempt_1` and `attempt_2` retrievals via [`store.get_retrievals`](../../ava_eval/db/store.py#L536).
+- **API:** `GET /claims/{id}` returns `attempt_1` and `attempt_2` retrievals via [`store.get_retrievals`](../../ava_eval/db/store.py).

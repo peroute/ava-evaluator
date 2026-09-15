@@ -1,4 +1,4 @@
-"""Step 6 — judge each claim against its retrieved evidence.  [STUB verdict, real retry]
+"""Step 6 — judge each claim against its retrieved evidence.
 
 One pass, three possible answers: SUPPORTED, CONTRADICTED, NOT_FOUND. Not two
 sequential passes (gap check, then contradiction check) — that reads the same

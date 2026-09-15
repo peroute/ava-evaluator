@@ -2,7 +2,7 @@
 
 [← Step 6](s6-judge.md) · [Overview](../overview.md) · [Walkthrough →](../walkthrough.md)
 
-**Command:** `python -m ava_eval report [--session ID]` and `python -m ava_eval serve` · **Code:** [`ava_eval/steps/s7_aggregate.py`](../../ava_eval/steps/s7_aggregate.py), views in [`0001_initial_schema.py`](../../ava_eval/db/migrations/versions/0001_initial_schema.py#L148), [`ava_eval/api/main.py`](../../ava_eval/api/main.py)
+**Command:** `python -m ava_eval report [--session ID]` and `python -m ava_eval serve` · **Code:** [`ava_eval/steps/s7_aggregate.py`](../../ava_eval/steps/s7_aggregate.py), views in [`0001_initial_schema.py`](../../ava_eval/db/migrations/versions/0001_initial_schema.py) (redefined in 0003 and 0004), [`ava_eval/api/main.py`](../../ava_eval/api/main.py)
 
 ## What it does
 
@@ -44,18 +44,22 @@ The three rollup views were created in 0001 and redefined in migration 0004.
 
 ### The Python
 
-- [`conversation_report`](../../ava_eval/steps/s7_aggregate.py#L37) collects [`verdict_stats`](../../ava_eval/db/store.py#L669)
-  (its `totals` include `unjudged`), [`conversation_summary`](../../ava_eval/db/store.py#L609), [`turn_results`](../../ava_eval/db/store.py#L619),
-  flagged claims via [`claim_results`](../../ava_eval/db/store.py#L629) (CONTRADICTED first, then NOT_FOUND, up to 500 each),
+- [`conversation_report`](../../ava_eval/steps/s7_aggregate.py) collects [`verdict_stats`](../../ava_eval/db/store.py)
+  (its `totals` include `unjudged`), [`conversation_summary`](../../ava_eval/db/store.py), [`turn_results`](../../ava_eval/db/store.py),
+  flagged claims via [`claim_results`](../../ava_eval/db/store.py) (CONTRADICTED first, then NOT_FOUND, up to 500 each),
   and unjudged claims via `claim_results(unjudged=True)`.
-- [`format_report`](../../ava_eval/steps/s7_aggregate.py#L67) prints the text report: a `[!] N claims are UNJUDGED` header
+- [`format_report`](../../ava_eval/steps/s7_aggregate.py) prints the text report: a `[!] N claims are UNJUDGED` header
   line when there are any, an `unjudged N` column per conversation, and an "Unjudged claims" section before the flagged
-  ones. [`_bar`](../../ava_eval/steps/s7_aggregate.py#L56) draws the verdict mix as `#` (contradicted) `~` (not found) `.` (supported).
+  ones. [`_bar`](../../ava_eval/steps/s7_aggregate.py) draws the verdict mix as `#` (contradicted) `~` (not found) `.` (supported).
 
-### The API (read-only)
+### The API
+
+Every endpoint but one only reads. `POST /evaluations` submits a transcript to the normal pipeline; nothing edits a
+verdict.
 
 | Endpoint | Returns |
 |---|---|
+| `POST /evaluations` | Runs step 1 and steps 3–6 on one transcript while the request waits, then returns `{session_id, summary, turns, claims}`. `422` rejected, `503` KB empty or DB down, `500` pipeline error. Details: [Frontend](../frontend.md#submitting-a-transcript) |
 | `GET /health` | status, chunk count, **stub flags**, model name |
 | `GET /stats` | totals, counts by verdict and by tag |
 | `GET /conversations` | `v_conversation_summary` |
@@ -72,12 +76,14 @@ Interactive docs at `http://127.0.0.1:8000/docs`.
 - **`CONTRADICTED` and `NOT_FOUND` are never merged into one "flagged" count.** They go to different people: a
   contradiction is an Ava behaviour fix, a gap is usually a TTU content fix. One combined number is something neither team can act on.
 - **Worst-first ordering.** That's the order a reviewer wants to read problems in.
-- **The API can't change anything.** Verdicts are evidence, not an editable document. Evaluation happens through the CLI.
+- **Verdicts can't be edited through the API.** They're evidence, not an editable document. The one write endpoint,
+  `POST /evaluations`, submits a transcript to the same pipeline as `ingest` + `evaluate`; it never touches an existing
+  verdict except by re-evaluating that conversation.
 - **Stub flags are exposed on `/health`,** so a frontend can warn that it's showing keyword-heuristic output, not model verdicts.
 
 ## Gotchas
 
-- **Severity is defined in two places:** [`SEVERITY` in models.py](../../ava_eval/models.py#L59) and the `CASE` in
+- **Severity is defined in two places:** [`SEVERITY` in models.py](../../ava_eval/models.py) and the `CASE` in
   `v_turn_severity`. Change both together, and change the view through a **new** migration (`CREATE OR REPLACE VIEW`),
   never by editing 0001.
 - `report --session X` filters conversations, turns and flagged claims, but the **header totals (`stats`) are always
@@ -87,7 +93,9 @@ Interactive docs at `http://127.0.0.1:8000/docs`.
   with the current one, and the report prints `[!] the knowledge base changed since this verdict` on those rows. It
   warns rather than deletes, by design: re-run `evaluate` to refresh them. Verdicts saved before migration 0003 have no
   hash and are always flagged.
-- CORS is `allow_origins=["*"]` for local development. Restrict it before the API is reachable from anywhere real.
+- CORS is `allow_origins=["*"]` (methods `GET`, `POST`) for local development. The frontend doesn't need it, because
+  nginx serves the page and the API from one origin. It only matters for a page on another origin calling `:8000`
+  directly. Restrict it before the API is reachable from anywhere real.
 
 ## Tests
 
@@ -100,6 +108,7 @@ and unjudged claims are counted in the summary, the stats and the `unjudged` fil
 ## Connects to
 
 - **Previous:** [Step 6](s6-judge.md) wrote `verdicts`. Everything here derives from it plus the step 1–4 tables.
-- **Where it's called:** [`cmd_report`](../../ava_eval/cli.py#L112), [`cmd_serve`](../../ava_eval/cli.py#L120). In
-  Docker, the `api` container serves it after migrating ([Operations](../operations.md)).
+- **Where it's called:** [`cmd_report`](../../ava_eval/cli.py), [`cmd_serve`](../../ava_eval/cli.py), and
+  [`evaluation_service`](../../ava_eval/evaluation_service.py) after a submit. In Docker, the `api` container serves it
+  after migrating ([Operations](../operations.md)), and the [frontend](../frontend.md) reads it through nginx.
 - **See it end to end:** [Walkthrough](../walkthrough.md).

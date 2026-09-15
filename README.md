@@ -23,6 +23,7 @@ Tags only appear on claims whose first verdict was `NOT_FOUND`. A claim is never
 | [Overview](docs/overview.md) | The big picture: problem, pipeline, architecture, data model, glossary. **Start here.** |
 | [Walkthrough](docs/walkthrough.md) | One real conversation traced through all 7 steps, with the actual database rows |
 | Steps: [1](docs/steps/s1-ingest.md) · [2](docs/steps/s2-index-kb.md) · [3](docs/steps/s3-classify.md) · [4](docs/steps/s4-decompose.md) · [5](docs/steps/s5-retrieve.md) · [6](docs/steps/s6-judge.md) · [7](docs/steps/s7-aggregate.md) | How each step works in code, why it's built that way, gotchas, tests |
+| [Frontend](docs/frontend.md) | The staff web page and `POST /evaluations`: views, submit flow, error codes, tests |
 | [Operations](docs/operations.md) | Configuration, Docker, database, migrations, tests, going live |
 
 ## Pipeline
@@ -112,6 +113,9 @@ re-ingesting, re-chunking, or re-embedding anything.
 ```powershell
 docker compose up -d db
 python -m pytest
+
+cd frontend
+node --test                    # frontend logic, Node 18+, no npm install
 ```
 
 Runs offline against the separate `ava_eval_test` database. Details in [Operations](docs/operations.md#tests).
