@@ -12,6 +12,8 @@ from fastapi import HTTPException
 from ava_eval import evaluation_service
 from ava_eval.api import main as api
 from ava_eval.api.main import app, create_evaluation
+from ava_eval.db import store
+from ava_eval.models import Claim, ClaimVerdict, ConversationStatus, Turn, Verdict
 
 
 def _request(method: str, path: str, body: bytes = b"") -> tuple[int, bytes]:
@@ -145,3 +147,43 @@ def test_existing_conversation_detail_still_uses_result_readers(
         "turns": [{"pair_index": 0}],
         "claims": [{"claim_id": "claim-1"}],
     }
+
+
+def test_conversation_detail_reports_unjudged_claims(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The UI marks claims and turns "Not judged" from exactly these fields.
+
+    One turn, two claims, only one verdict saved -- the shape step 6 leaves when a
+    judge call fails. The turn still reads SUPPORTED (its worst real verdict), so
+    ``unjudged_count`` is the only thing telling the UI the turn is incomplete.
+    """
+    with store.connect(db_url) as conn:
+        store.upsert_conversation(conn, "s1", "f.json", ConversationStatus.ACCEPTED)
+        store.replace_turns(
+            conn, "s1", [Turn(session_id="s1", pair_index=0, caller_asked="q", agent_said="a")]
+        )
+        store.replace_claims_for_session(
+            conn,
+            "s1",
+            [
+                Claim(claim_id=cid, session_id="s1", pair_index=0, subject_tag="S", text="t")
+                for cid in ("c0", "c1")
+            ],
+        )
+        store.save_verdict(conn, ClaimVerdict(claim_id="c0", verdict=Verdict.SUPPORTED))
+
+    real_connect = store.connect
+    monkeypatch.setattr(api.store, "connect", lambda: real_connect(db_url))
+
+    status, body = _request("GET", "/conversations/s1")
+
+    assert status == 200
+    data = json.loads(body)
+    assert data["summary"]["unjudged_turns"] == 1
+    assert data["turns"][0]["turn_verdict"] == "SUPPORTED"
+    assert data["turns"][0]["unjudged_count"] == 1
+    claims = {claim["claim_id"]: claim for claim in data["claims"]}
+    assert claims["c0"]["verdict"] == "SUPPORTED"
+    assert claims["c1"]["verdict"] is None
+    assert claims["c1"]["kb_changed_since_judged"] is None
