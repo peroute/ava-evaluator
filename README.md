@@ -1,7 +1,10 @@
-# Ava Evaluator — Phase 1
+# Ava Evaluator
 
 Automated checking of whether **Ava** (TTU Online's ElevenLabs voice agent) says
 things that are actually backed by TTU's knowledge base.
+
+**Stack:** Python 3.11+ · FastAPI · PostgreSQL · Gemini (LLM + embeddings) · plain JS frontend · Docker.
+**Status:** Phase 1. Runs fully offline in stub mode; live mode needs a Gemini key.
 
 It reads exported call transcripts, breaks each of Ava's answers into individual
 checkable statements, looks each one up in the knowledge base, and records
@@ -15,6 +18,9 @@ whether the KB **supports** it, **contradicts** it, or **says nothing about it**
 | `SUPPORTED`/`CONTRADICTED` + `retrieval_miss` | The evidence existed, but only the wider retry search found it | This evaluator's tuning (the verdict itself still applies) |
 
 Tags only appear on claims whose first verdict was `NOT_FOUND`. A claim is never `NOT_FOUND` + `retrieval_miss`.
+
+Staff can also paste a transcript into the web frontend and get verdicts back
+(see [Frontend](docs/frontend.md)).
 
 ## Documentation
 
@@ -119,3 +125,17 @@ node --test                    # frontend logic, Node 18+, no npm install
 ```
 
 Runs offline against the separate `ava_eval_test` database. Details in [Operations](docs/operations.md#tests).
+
+## Project layout
+
+| Path | What's in it |
+|---|---|
+| `ava_eval/` | The pipeline: `steps/` (one module per step), `llm/` (prompts + Gemini calls), `kb/`, `db/`, `api/` |
+| `frontend/` | Staff web page (no build step) and its Node tests |
+| `tests/` | pytest suite |
+| `sample_data/` | Fake transcripts and KB for offline runs |
+| `docs/` | All deeper documentation |
+
+## Going live
+
+Set `GEMINI_API_KEY` and flip `AVA_STUB_LLM` / `AVA_STUB_EMBED` to `0`. Checklist in [Operations](docs/operations.md#going-live).
