@@ -1,72 +1,17 @@
 # Ava Evaluator
 
-Automated checking of whether **Ava** (TTU Online's ElevenLabs voice agent) says
-things that are actually backed by TTU's knowledge base.
-
-**Stack:** Python 3.11+ · FastAPI · PostgreSQL · Gemini (LLM + embeddings) · plain JS frontend · Docker.
-**Status:** Phase 1. Runs fully offline in stub mode; live mode needs a Gemini key.
-
-It reads exported call transcripts, breaks each of Ava's answers into individual
-checkable statements, looks each one up in the knowledge base, and records
-whether the KB **supports** it, **contradicts** it, or **says nothing about it**.
-
-| Verdict | Means | Who fixes it |
-|---|---|---|
-| `CONTRADICTED` | The KB says something incompatible with what Ava said | Ava's prompting/behaviour |
-| `NOT_FOUND` + `kb_gap` | The KB has nothing on this, even after a wider search | TTU's content team |
-| `SUPPORTED` | The KB backs it up | Nobody |
-| `SUPPORTED`/`CONTRADICTED` + `retrieval_miss` | The evidence existed, but only the wider retry search found it | This evaluator's tuning (the verdict itself still applies) |
-
-Tags only appear on claims whose first verdict was `NOT_FOUND`. A claim is never `NOT_FOUND` + `retrieval_miss`.
-
-Staff can also paste a transcript into the web frontend and get verdicts back
-(see [Frontend](docs/frontend.md)).
-
-## Documentation
-
-| Doc | For |
-|---|---|
-| [Overview](docs/overview.md) | The big picture: problem, pipeline, architecture, data model, glossary. **Start here.** |
-| [Walkthrough](docs/walkthrough.md) | One real conversation traced through all 7 steps, with the actual database rows |
-| Steps: [1](docs/steps/s1-ingest.md) · [2](docs/steps/s2-index-kb.md) · [3](docs/steps/s3-classify.md) · [4](docs/steps/s4-decompose.md) · [5](docs/steps/s5-retrieve.md) · [6](docs/steps/s6-judge.md) · [7](docs/steps/s7-aggregate.md) | How each step works in code, why it's built that way, gotchas, tests |
-| [Frontend](docs/frontend.md) | The staff web page and `POST /evaluations`: views, submit flow, error codes, tests |
-| [Operations](docs/operations.md) | Configuration, Docker, database, migrations, tests, going live |
-
-## Pipeline
-
-```
-transcripts ──▶ 1. ingest ──▶ 3. classify ──(nothing checkable)──▶ stored, not evaluated
-                                  │
-                             (has claims)
-                                  ▼
-                          4. decompose into self-contained claims
-                                  ▼
-                          5. retrieve KB chunks per claim
-                                  ▼
-                          6. judge: SUPPORTED / CONTRADICTED / NOT_FOUND
-                                  ▼
-                          7. roll up to turn + conversation level
-
-KB documents ──▶ 2. index  (separate cadence: runs when the KB changes)
-```
+Checks whether Ava, TTU Online's voice agent, says things backed by TTU's knowledge base (KB).
 
 ## Quick start
 
-Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/) running.
-
-### Option A — everything in Docker
+Needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) running. Works offline with no API key
+(stub mode, which is not a real verdict).
 
 ```powershell
-copy .env.example .env         # works offline as-is; add a key when going live
+copy .env.example .env
 docker compose up --build      # Postgres + API + frontend
-```
 
-Open the evaluation frontend at `http://127.0.0.1:8080`. The API remains
-available directly at `http://127.0.0.1:8000` (interactive docs at `/docs`).
-
-In a second terminal, run the pipeline inside the same image:
-
-```powershell
+# in a second terminal
 docker compose run --rm api python scripts/make_sample_kb.py
 docker compose run --rm api python -m ava_eval ingest
 docker compose run --rm api python -m ava_eval index-kb
@@ -74,68 +19,54 @@ docker compose run --rm api python -m ava_eval evaluate
 docker compose run --rm api python -m ava_eval report
 ```
 
-### Option B — Postgres in Docker, Python on your machine
+Frontend: http://127.0.0.1:8080 · API docs: http://127.0.0.1:8000/docs
 
-Faster edit-run loop while developing.
+## LLM-as-judge pipeline
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements-dev.txt
-
-copy .env.example .env
-docker compose up -d db        # just the database, on 127.0.0.1:5433
-python scripts\make_sample_kb.py
-
-python -m ava_eval migrate
-python -m ava_eval ingest
-python -m ava_eval index-kb
-python -m ava_eval evaluate
-python -m ava_eval report
-python -m ava_eval serve       # http://127.0.0.1:8000  (interactive docs at /docs)
+```mermaid
+flowchart LR
+    T[Transcripts] --> C[Classify turns]
+    C -->|has claims| D[Split into claims]
+    C -->|nothing checkable| S[Stored, not judged]
+    D --> R[Retrieve KB chunks]
+    KB[(KB index)] --> R
+    R --> J[LLM judge]
+    J --> A[Roll up to turn<br/>and conversation]
 ```
 
-Both run the whole pipeline with **no API key and no network calls** (`AVA_STUB_LLM=1`,
-`AVA_STUB_EMBED=1`), on the sample data in `sample_data/`. **Stubbed output is not a real
-verdict.** Every command prints its mode. See [stub vs live](docs/overview.md#stub-mode-vs-live-mode).
+The judge is an LLM (temperature 0) that reads only the retrieved KB excerpts, never its own knowledge. For each
+claim it returns a verdict (`SUPPORTED`, `CONTRADICTED` or `NOT_FOUND`), a rationale, and the `chunk_id` of the
+excerpt that decided it.
 
-## Commands
+## Asymmetric retry
 
-| Command | Step | When you run it |
-|---|---|---|
-| `migrate` | — | After cloning, and whenever someone adds a migration |
-| `ingest --input DIR` | 1 | When new transcripts arrive |
-| `index-kb [--kb-file FILE] [--force]` | 2 | When TTU edits the knowledge base document (`AVA_KB_FILE`, default: the sample KB) |
-| `evaluate [--session ID]` | 3–6 | To produce verdicts |
-| `report [--session ID]` | 7 | To read the results |
-| `serve [--port N]` | — | To let the frontend query results |
+Only `NOT_FOUND` gets a second chance: one retry with a search 3× wider (`AVA_RETRY_K_MULTIPLIER`).
 
-They are separate commands because every stage's output is saved to the
-database. You can re-run step 6 after changing the judge prompt without
-re-ingesting, re-chunking, or re-embedding anything.
-
-## Tests
-
-```powershell
-docker compose up -d db
-python -m pytest
-
-cd frontend
-node --test                    # frontend logic, Node 18+, no npm install
+```mermaid
+flowchart TD
+    J[First judgement] -->|SUPPORTED / CONTRADICTED| F[Final, no retry]
+    J -->|NOT_FOUND| W[Search 3× wider, judge again]
+    W -->|still NOT_FOUND| G[NOT_FOUND + kb_gap]
+    W -->|SUPPORTED / CONTRADICTED| M[that verdict + retrieval_miss]
 ```
 
-Runs offline against the separate `ava_eval_test` database. Details in [Operations](docs/operations.md#tests).
+- Still not found → `kb_gap`: the KB is missing this, so TTU's content team fixes it.
+- Found on retry → that verdict plus `retrieval_miss`: the evidence existed but our search missed it.
 
-## Project layout
+`SUPPORTED` and `CONTRADICTED` never retry. Retrying a contradiction would let the judge hunt for a friendlier
+chunk and bury a real error.
 
-| Path | What's in it |
-|---|---|
-| `ava_eval/` | The pipeline: `steps/` (one module per step), `llm/` (prompts + Gemini calls), `kb/`, `db/`, `api/` |
-| `frontend/` | Staff web page (no build step) and its Node tests |
-| `tests/` | pytest suite |
-| `sample_data/` | Fake transcripts and KB for offline runs |
-| `docs/` | All deeper documentation |
+## Evidence-ID check
 
-## Going live
+The `chunk_id` the judge cites must be one of the chunks it was shown. If it's made up, or missing on a
+`SUPPORTED`/`CONTRADICTED`, the claim fails and shows as `UNJUDGED`. A flag is never saved without evidence
+you can trace back to the KB.
 
-Set `GEMINI_API_KEY` and flip `AVA_STUB_LLM` / `AVA_STUB_EMBED` to `0`. Checklist in [Operations](docs/operations.md#going-live).
+## Running tests
+
+```powershell
+docker compose up -d db                       # test database
+python -m pytest                              # whole suite, offline
+python -m pytest tests/test_judge_policy.py   # retry and evidence-ID check only
+cd frontend; node --test                      # frontend logic (Node 18+)
+```
